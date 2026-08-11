@@ -42,6 +42,6 @@ Phase 3.5 integration tests cover source lifecycle restoration, multi-provider f
 
 **Local Desktop Integration Gate — Status: PASSED.** The current tree passes native `cargo check -p glancelet-desktop --all-features` and desktop clippy on Linux with GTK/WebKitGTK prerequisites.
 
-**Current-tree GitHub Actions — Status: PENDING.** CI installs the current Tauri 2 Debian/Ubuntu prerequisites and separately runs native desktop check and clippy. This status is updated only after the exact freeze commit succeeds remotely; the operational gate is independent of Core Architecture validation.
+**Current-tree GitHub Actions — Status: PASSED.** CI installs the current Tauri 2 Debian/Ubuntu prerequisites and separately runs native desktop check and clippy. The Core v0 freeze tree passed both native and web jobs; this operational gate remains independent of Core Architecture validation.
 
 Runtime plugins, rules, AI, relations, generic OAuth infrastructure, widget/theme SDKs, and speculative database tables remain absent.
