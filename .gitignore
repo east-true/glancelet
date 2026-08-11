@@ -1,0 +1,25 @@
+/target
+/node_modules
+/apps/desktop/dist
+/apps/desktop/node_modules
+/apps/desktop/src-tauri/gen
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+.secrets
+
+# Local AI coding assistant configuration
+**/.codex/
+**/.claude/
+**/.agents/
+**/AGENTS.md
+**/CLAUDE.md

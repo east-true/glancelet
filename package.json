@@ -1,0 +1,20 @@
+{
+  "name": "glancelet",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/desktop"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @glancelet/desktop",
+    "dev": "npm run dev --workspace @glancelet/desktop",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "npm run lint --workspace @glancelet/desktop",
+    "test": "npm run test --workspace @glancelet/desktop",
+    "tauri": "npm run tauri --workspace @glancelet/desktop"
+  },
+  "devDependencies": {
+    "prettier": "^3.6.2"
+  }
+}

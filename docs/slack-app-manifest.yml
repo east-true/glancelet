@@ -1,0 +1,14 @@
+display_information:
+  name: Glancelet Development
+  description: Local development app for Slack Reaction Capture
+oauth_config:
+  redirect_urls:
+    - http://localhost:42813/oauth/slack/callback
+  scopes:
+    user:
+      - reactions:read
+  pkce_enabled: true
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: true
