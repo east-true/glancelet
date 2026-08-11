@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, task::JoinSet};
 
 use crate::{
     application::{Clock, WorkStore},
@@ -41,7 +41,17 @@ impl SyncCoordinator {
         let _guard = source_lock.lock().await;
 
         let config = self.store.source_config(source_config_id)?;
+        if !config.enabled || config.removed_at.is_some() {
+            return Err(crate::GlanceletError::InvalidOperation(
+                "source is disabled or removed".into(),
+            ));
+        }
         let runtime = self.store.source_runtime(source_config_id)?;
+        if runtime.authentication_required() {
+            return Err(crate::GlanceletError::AuthenticationRequired(
+                "Reconnect the source connection before syncing".into(),
+            ));
+        }
         let adapter = self.registry.adapter(&config.source_type_id)?;
         let attempt_at = self.clock.now();
         self.store
@@ -50,14 +60,23 @@ impl SyncCoordinator {
         let batch = match adapter.fetch(&config, runtime.checkpoint).await {
             Ok(batch) => batch,
             Err(error) => {
-                let retry_seconds = error
-                    .retry_after_seconds()
-                    .unwrap_or(config.expected_sync_interval_seconds)
-                    .max(1);
+                let now = self.clock.now();
+                let next_retry_at =
+                    if matches!(error, crate::GlanceletError::AuthenticationRequired(_)) {
+                        // Authentication cannot recover with time. A successful reconnect
+                        // explicitly resumes every SourceConfig for this Connection.
+                        None
+                    } else {
+                        let retry_seconds = error
+                            .retry_after_seconds()
+                            .unwrap_or(config.expected_sync_interval_seconds)
+                            .max(1);
+                        Some(now + chrono::Duration::seconds(retry_seconds))
+                    };
                 self.store.record_sync_failure(
                     source_config_id,
-                    self.clock.now(),
-                    self.clock.now() + chrono::Duration::seconds(retry_seconds),
+                    now,
+                    next_retry_at,
                     &error.to_string(),
                 )?;
                 return Err(error);
@@ -66,6 +85,52 @@ impl SyncCoordinator {
 
         self.store
             .apply_source_batch(&config, &batch, self.clock.now())
+    }
+
+    pub fn resume_connection(&self, connection_id: &str) -> Result<()> {
+        for config in
+            self.store.source_configs()?.into_iter().filter(|config| {
+                config.connection_id == connection_id && config.removed_at.is_none()
+            })
+        {
+            if self
+                .store
+                .source_runtime(&config.id)?
+                .authentication_required()
+            {
+                self.store.clear_sync_failure(&config.id)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs independent SourceConfigs concurrently while `sync` keeps the
+    /// existing per-SourceConfig single-flight invariant.
+    pub async fn sync_many(
+        self: &Arc<Self>,
+        source_config_ids: Vec<String>,
+    ) -> Vec<(String, Result<usize>)> {
+        let mut jobs = JoinSet::new();
+        for source_config_id in source_config_ids {
+            let coordinator = Arc::clone(self);
+            jobs.spawn(async move {
+                let result = coordinator.sync(&source_config_id).await;
+                (source_config_id, result)
+            });
+        }
+        let mut results = Vec::new();
+        while let Some(completed) = jobs.join_next().await {
+            match completed {
+                Ok(result) => results.push(result),
+                Err(_) => results.push((
+                    "unknown".into(),
+                    Err(crate::GlanceletError::Source(
+                        "source sync task stopped unexpectedly".into(),
+                    )),
+                )),
+            }
+        }
+        results
     }
 }
 

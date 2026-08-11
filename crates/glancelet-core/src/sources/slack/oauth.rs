@@ -1,14 +1,14 @@
 use std::{collections::HashMap, sync::Arc};
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{DateTime, Utc};
-use rand::RngCore;
-use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::{
     application::Clock,
-    sources::slack::{SlackApiClient, SlackCredential, SlackIdentity},
+    sources::{
+        pkce::{random_urlsafe, PkcePair},
+        slack::{SlackApiClient, SlackCredential, SlackIdentity},
+    },
     GlanceletError, Result,
 };
 
@@ -38,7 +38,7 @@ pub struct SlackOAuthService {
 
 impl SlackOAuthService {
     pub fn production(client: Arc<SlackApiClient>, clock: Arc<dyn Clock>) -> Self {
-        Self::new(client, clock, "https://slack.com/oauth/v2_user/authorize")
+        Self::new(client, clock, "https://slack.com/oauth/v2/authorize")
     }
 
     pub fn new(
@@ -61,16 +61,15 @@ impl SlackOAuthService {
             ));
         }
         let state = random_urlsafe(32);
-        let verifier = random_urlsafe(64);
-        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        let pkce = PkcePair::generate();
         let mut url = Url::parse(&self.authorize_base)
             .map_err(|_| GlanceletError::OAuth("invalid Slack authorize endpoint".into()))?;
         url.query_pairs_mut()
             .append_pair("client_id", client_id)
-            .append_pair("scope", "reactions:read")
+            .append_pair("user_scope", "reactions:read")
             .append_pair("redirect_uri", redirect_uri)
             .append_pair("state", &state)
-            .append_pair("code_challenge", &challenge)
+            .append_pair("code_challenge", &pkce.challenge)
             .append_pair("code_challenge_method", "S256");
 
         self.sessions
@@ -80,7 +79,7 @@ impl SlackOAuthService {
                 state.clone(),
                 PendingSession {
                     client_id: client_id.into(),
-                    verifier,
+                    verifier: pkce.verifier,
                     redirect_uri: redirect_uri.into(),
                     expires_at: self.clock.now() + chrono::Duration::minutes(10),
                 },
@@ -133,12 +132,6 @@ impl SlackOAuthService {
     }
 }
 
-fn random_urlsafe(bytes: usize) -> String {
-    let mut value = vec![0_u8; bytes];
-    rand::rng().fill_bytes(&mut value);
-    URL_SAFE_NO_PAD.encode(value)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -167,9 +160,29 @@ mod tests {
             .query_pairs()
             .collect::<std::collections::HashMap<_, _>>();
         assert_eq!(values.get("code_challenge_method").unwrap(), "S256");
-        assert_eq!(values.get("scope").unwrap(), "reactions:read");
+        assert_eq!(values.get("user_scope").unwrap(), "reactions:read");
         assert!(values.get("code_challenge").unwrap().len() >= 43);
         assert_eq!(values.get("state").unwrap(), &start.state);
+    }
+
+    #[test]
+    fn production_uses_the_standard_v2_authorization_endpoint() {
+        let clock = Arc::new(FixedClock::new(
+            Utc.with_ymd_and_hms(2026, 8, 11, 0, 0, 0).single().unwrap(),
+        ));
+        let client = Arc::new(SlackApiClient::new(Client::new(), "http://127.0.0.1:1"));
+        let service = SlackOAuthService::production(client, clock);
+        let start = service
+            .begin("client", "http://localhost:42813/oauth/slack/callback")
+            .unwrap();
+        let url = Url::parse(&start.authorization_url).unwrap();
+        assert_eq!(url.path(), "/oauth/v2/authorize");
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "user_scope")
+                .map(|(_, value)| value.into_owned()),
+            Some("reactions:read".into())
+        );
     }
 
     #[tokio::test]

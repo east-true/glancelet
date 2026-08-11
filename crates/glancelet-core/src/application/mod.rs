@@ -31,6 +31,14 @@ pub struct SourceRuntime {
     pub last_error: Option<String>,
 }
 
+impl SourceRuntime {
+    pub fn authentication_required(&self) -> bool {
+        self.last_error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("authentication is required"))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct StoredWork {
     pub entry: WorkEntry,
@@ -65,9 +73,10 @@ pub trait WorkStore: Send + Sync {
         &self,
         id: &str,
         now: DateTime<Utc>,
-        next_retry_at: DateTime<Utc>,
+        next_retry_at: Option<DateTime<Utc>>,
         error: &str,
     ) -> Result<()>;
+    fn clear_sync_failure(&self, id: &str) -> Result<()>;
     fn apply_source_batch(
         &self,
         config: &SourceConfig,

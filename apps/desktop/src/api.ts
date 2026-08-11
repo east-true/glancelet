@@ -63,6 +63,96 @@ export interface SlackConnection {
   lastError: string | null;
 }
 
+export interface NotionPropertyMapping {
+  id: string;
+  name: string;
+}
+
+export interface NotionSourceSettings {
+  dataSourceId: string;
+  dataSourceName: string;
+  properties: {
+    title: NotionPropertyMapping;
+    assignee: NotionPropertyMapping | null;
+    status: NotionPropertyMapping | null;
+    due: NotionPropertyMapping | null;
+  };
+  onlyAssignedToMe: boolean;
+  activeStatusIds: string[];
+}
+
+export interface NotionStatusSchema {
+  options: { id: string; name: string }[];
+  groups: { id: string; name: string; optionIds: string[] }[];
+}
+
+export interface NotionPropertySchema {
+  id: string;
+  name: string;
+  type: string;
+  status: NotionStatusSchema | null;
+}
+
+export interface NotionDataSource {
+  id: string;
+  title: string;
+  properties: NotionPropertySchema[];
+}
+
+export interface NotionSource {
+  sourceId: string;
+  dataSourceId: string;
+  name: string;
+  enabled: boolean;
+  settings: NotionSourceSettings;
+  lastSync: string | null;
+  lastError: string | null;
+}
+
+export interface NotionConnection {
+  connectionId: string;
+  user: string;
+  status: "connected" | "reauth_required" | "disconnected";
+  sources: NotionSource[];
+}
+
+export interface NotionDataSourceSummary {
+  id: string;
+  title: string;
+}
+
+export interface NotionPreviewRow {
+  externalId: string;
+  title: string;
+  status: string | null;
+  due: unknown | null;
+}
+
+export interface GoogleCalendar {
+  id: string;
+  summary: string;
+  summaryOverride: string | null;
+  timeZone: string | null;
+  primary: boolean;
+  selected: boolean;
+}
+
+export interface GoogleCalendarSource {
+  sourceId: string;
+  calendarId: string;
+  name: string;
+  enabled: boolean;
+  lastSync: string | null;
+  lastError: string | null;
+}
+
+export interface GoogleConnection {
+  connectionId: string;
+  email: string;
+  status: "connected" | "reauth_required" | "disconnected";
+  sources: GoogleCalendarSource[];
+}
+
 export type WorkCommand =
   | { type: "plan"; date: string }
   | { type: "move_to_inbox" }
@@ -92,6 +182,54 @@ export const glanceletApi = {
     }),
   disconnectSlack: (connectionId: string) =>
     invoke<void>("disconnect_slack", { connectionId }),
+  notionConnections: () => invoke<NotionConnection[]>("notion_connections"),
+  connectNotion: (token: string) => invoke<void>("connect_notion", { token }),
+  searchNotionDataSources: (connectionId: string, query: string) =>
+    invoke<NotionDataSourceSummary[]>("search_notion_data_sources", {
+      connectionId,
+      query,
+    }),
+  notionDataSourceSchema: (connectionId: string, dataSourceId: string) =>
+    invoke<NotionDataSource>("notion_data_source_schema", {
+      connectionId,
+      dataSourceId,
+    }),
+  previewNotionSource: (connectionId: string, settings: NotionSourceSettings) =>
+    invoke<NotionPreviewRow[]>("preview_notion_source", {
+      connectionId,
+      settings,
+    }),
+  saveNotionSource: (
+    connectionId: string,
+    sourceId: string | null,
+    settings: NotionSourceSettings,
+  ) =>
+    invoke<string>("save_notion_source", {
+      connectionId,
+      sourceId,
+      settings,
+    }),
+  updateNotionSource: (sourceId: string, enabled: boolean) =>
+    invoke<void>("update_notion_source", { sourceId, enabled }),
+  removeNotionSource: (sourceId: string) =>
+    invoke<void>("remove_notion_source", { sourceId }),
+  disconnectNotion: (connectionId: string) =>
+    invoke<void>("disconnect_notion", { connectionId }),
+  googleConnections: () => invoke<GoogleConnection[]>("google_connections"),
+  connectGoogle: () => invoke<void>("connect_google"),
+  googleCalendars: (connectionId: string) =>
+    invoke<GoogleCalendar[]>("google_calendars", { connectionId }),
+  saveGoogleCalendars: (connectionId: string, calendarIds: string[]) =>
+    invoke<string[]>("save_google_calendars", {
+      connectionId,
+      selections: calendarIds.map((calendarId) => ({ calendarId })),
+    }),
+  updateGoogleSource: (sourceId: string, enabled: boolean) =>
+    invoke<void>("update_google_source", { sourceId, enabled }),
+  removeGoogleSource: (sourceId: string) =>
+    invoke<void>("remove_google_source", { sourceId }),
+  disconnectGoogle: (connectionId: string) =>
+    invoke<void>("disconnect_google", { connectionId }),
   command: (workId: string, command: WorkCommand) =>
     invoke<void>("run_work_command", { workId, command }),
   openSource: (workId: string) => invoke<void>("open_source", { workId }),

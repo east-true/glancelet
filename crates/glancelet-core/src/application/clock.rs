@@ -43,6 +43,7 @@ impl Clock for FixedClock {
 #[derive(Clone, Copy, Debug)]
 pub struct TimeContext {
     timezone: Tz,
+    follows_system_timezone: bool,
 }
 
 impl TimeContext {
@@ -50,21 +51,33 @@ impl TimeContext {
         let name = iana_time_zone::get_timezone().map_err(|error| {
             GlanceletError::InvalidOperation(format!("cannot determine local timezone: {error}"))
         })?;
-        Self::named(&name)
+        let mut context = Self::named(&name)?;
+        context.follows_system_timezone = true;
+        Ok(context)
     }
 
     pub fn named(name: &str) -> Result<Self> {
         let timezone = name.parse::<Tz>().map_err(|_| {
             GlanceletError::InvalidOperation(format!("unknown IANA timezone: {name}"))
         })?;
-        Ok(Self { timezone })
+        Ok(Self {
+            timezone,
+            follows_system_timezone: false,
+        })
     }
 
     pub fn local_date(&self, instant: DateTime<Utc>) -> chrono::NaiveDate {
-        instant.with_timezone(&self.timezone).date_naive()
+        instant.with_timezone(&self.timezone()).date_naive()
     }
 
     pub fn timezone(&self) -> Tz {
-        self.timezone
+        if self.follows_system_timezone {
+            iana_time_zone::get_timezone()
+                .ok()
+                .and_then(|name| name.parse::<Tz>().ok())
+                .unwrap_or(self.timezone)
+        } else {
+            self.timezone
+        }
     }
 }

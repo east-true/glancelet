@@ -45,7 +45,7 @@ impl SlackApiClient {
             ("grant_type", "authorization_code"),
         ];
         let response: TokenResponse = self
-            .send(self.http.post(self.url("oauth.v2.user.access")).form(&form))
+            .send(self.http.post(self.url("oauth.v2.access")).form(&form))
             .await?;
         SlackCredential::from_response(response, now)
     }
@@ -62,7 +62,7 @@ impl SlackApiClient {
             ("refresh_token", refresh_token),
         ];
         let response: TokenResponse = self
-            .send(self.http.post(self.url("oauth.v2.user.access")).form(&form))
+            .send(self.http.post(self.url("oauth.v2.access")).form(&form))
             .await?;
         SlackCredential::from_response(response, now)
     }
@@ -162,21 +162,35 @@ pub struct SlackCredential {
 
 impl SlackCredential {
     fn from_response(response: TokenResponse, now: DateTime<Utc>) -> Result<Self> {
-        if response.token_type.as_deref() != Some("user") {
+        let user = response.authed_user;
+        let (access_token, refresh_token, expires_in, scope, token_type) =
+            if let Some(user) = user.filter(|user| user.access_token.is_some()) {
+                (
+                    user.access_token,
+                    user.refresh_token,
+                    user.expires_in,
+                    user.scope,
+                    user.token_type,
+                )
+            } else {
+                (
+                    response.access_token,
+                    response.refresh_token,
+                    response.expires_in,
+                    response.scope,
+                    response.token_type,
+                )
+            };
+        if token_type.as_deref() != Some("user") {
             return Err(malformed("OAuth response did not contain a user token"));
         }
-        let access_token = response
-            .access_token
-            .ok_or_else(|| malformed("OAuth response omitted access token"))?;
+        let access_token =
+            access_token.ok_or_else(|| malformed("OAuth response omitted access token"))?;
         Ok(Self {
             access_token,
-            refresh_token: response.refresh_token,
-            expires_at: response
-                .expires_in
-                .map(|seconds| now + chrono::Duration::seconds(seconds)),
-            scope: response
-                .scope
-                .or_else(|| response.authed_user.and_then(|user| user.scope)),
+            refresh_token,
+            expires_at: expires_in.map(|seconds| now + chrono::Duration::seconds(seconds)),
+            scope,
         })
     }
 
@@ -217,6 +231,10 @@ struct TokenResponse {
 
 #[derive(Deserialize)]
 struct TokenUser {
+    access_token: Option<String>,
+    token_type: Option<String>,
+    expires_in: Option<i64>,
+    refresh_token: Option<String>,
     scope: Option<String>,
 }
 

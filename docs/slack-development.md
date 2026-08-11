@@ -1,8 +1,8 @@
 # Slack Reaction Capture development setup
 
-Glancelet Phase 1 uses a user token and the single `reactions:read` user scope. It does not create a bot, request bot scopes, subscribe to events, or write to Slack. The flow uses PKCE S256 and Slack's user-only authorization/token endpoints, so a client secret must not be configured or embedded.
+Glancelet Phase 1 uses a user token and the single `reactions:read` user scope. It does not create a bot, request bot scopes, subscribe to events, or write to Slack. The flow uses PKCE S256 and Slack's standard v2 authorization/token endpoints, so a client secret must not be configured or embedded.
 
-The implementation follows Slack's current [PKCE guide](https://docs.slack.dev/authentication/using-pkce/), [user-centric OAuth flow](https://docs.slack.dev/authentication/installing-with-oauth/#the-user-centric-flow-the-oauthv2useraccess-method), and [`oauth.v2.user.access` reference](https://docs.slack.dev/reference/methods/oauth.v2.user.access/). The fixed redirect URI is:
+The implementation follows Slack's current [PKCE guide](https://docs.slack.dev/authentication/using-pkce/) and [`oauth.v2.access` reference](https://docs.slack.dev/reference/methods/oauth.v2.access/). Authorization begins at `https://slack.com/oauth/v2/authorize`, requests `reactions:read` as a user scope, and exchanges the code at `https://slack.com/api/oauth.v2.access`. The fixed redirect URI is:
 
 ```text
 http://localhost:42813/oauth/slack/callback

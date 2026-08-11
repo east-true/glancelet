@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -308,17 +308,43 @@ fn belongs_to_today(stored: &StoredWork, today: NaiveDate, time_context: TimeCon
     }
     match stored.entry.kind {
         WorkKind::Action => stored.entry.planning == Some(WorkPlanning::Planned(today)),
-        WorkKind::Event => stored
-            .entry
-            .start
-            .as_ref()
-            .is_some_and(|value| match value {
-                TemporalValue::Date { date } => *date == today,
-                TemporalValue::DateTime { instant, .. } => {
-                    instant.with_timezone(&time_context.timezone()).date_naive() == today
-                }
-            }),
+        WorkKind::Event => event_overlaps_today(
+            stored.entry.start.as_ref(),
+            stored.entry.end.as_ref(),
+            today,
+            time_context,
+        ),
         WorkKind::Attention => true,
+    }
+}
+
+/// Event ranges are provider-neutral half-open intervals: `[start, end)`.
+fn event_overlaps_today(
+    start: Option<&TemporalValue>,
+    end: Option<&TemporalValue>,
+    today: NaiveDate,
+    time_context: TimeContext,
+) -> bool {
+    match (start, end) {
+        (Some(TemporalValue::Date { date: start }), Some(TemporalValue::Date { date: end })) => {
+            *start <= today && today < *end
+        }
+        (
+            Some(TemporalValue::DateTime { instant: start, .. }),
+            Some(TemporalValue::DateTime { instant: end, .. }),
+        ) => {
+            let timezone = time_context.timezone();
+            let start = start.with_timezone(&timezone);
+            let end = end.with_timezone(&timezone);
+            start.date_naive() <= today
+                && (end.date_naive() > today
+                    || end.date_naive() == today && end.time() > NaiveTime::MIN)
+        }
+        (Some(TemporalValue::Date { date }), _) => *date == today,
+        (Some(TemporalValue::DateTime { instant, .. }), _) => {
+            time_context.local_date(*instant) == today
+        }
+        (None, _) => false,
     }
 }
 

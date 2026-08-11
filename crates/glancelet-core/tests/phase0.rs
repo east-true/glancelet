@@ -88,6 +88,7 @@ impl Harness {
                 source_type_id: SourceTypeId(source_type.into()),
                 display_name: id.into(),
                 enabled: true,
+                removed_at: None,
                 expected_sync_interval_seconds: 60,
                 settings,
             })
@@ -113,7 +114,7 @@ fn migration_baseline_handles_fresh_legacy_and_reopened_databases() {
     let path = directory.path().join("migration.db");
     {
         let store = SqliteWorkStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 1);
+        assert_eq!(store.schema_version().unwrap(), 2);
     }
     {
         let connection = rusqlite::Connection::open(&path).unwrap();
@@ -126,15 +127,102 @@ fn migration_baseline_handles_fresh_legacy_and_reopened_databases() {
             .unwrap()
             .schema_version()
             .unwrap(),
-        1
+        2
     );
     assert_eq!(
         SqliteWorkStore::open(&path)
             .unwrap()
             .schema_version()
             .unwrap(),
-        1
+        2
     );
+}
+
+#[test]
+fn source_lifecycle_migration_preserves_history_and_moves_legacy_remove_marker() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("lifecycle.db");
+    {
+        let store = SqliteWorkStore::open(&path).unwrap();
+        store
+            .put_connection(&Connection {
+                id: "connection".into(),
+                provider_id: ProviderId("provider".into()),
+                display_name: "Account".into(),
+                config: json!({}),
+            })
+            .unwrap();
+        store
+            .put_source_config(&SourceConfig {
+                id: "source".into(),
+                connection_id: "connection".into(),
+                source_type_id: SourceTypeId("source.type".into()),
+                display_name: "Source".into(),
+                enabled: true,
+                removed_at: None,
+                expected_sync_interval_seconds: 60,
+                settings: json!({}),
+            })
+            .unwrap();
+    }
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute("DELETE FROM schema_migrations WHERE version=2", [])
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE source_configs
+                 SET settings_json='{\"_removed\":true}', removed_at=NULL, enabled=1
+                 WHERE id='source'",
+                [],
+            )
+            .unwrap();
+    }
+    let store = SqliteWorkStore::open(&path).unwrap();
+    let config = store.source_config("source").unwrap();
+    assert_eq!(store.schema_version().unwrap(), 2);
+    assert!(!config.enabled);
+    assert!(config.removed_at.is_some());
+    assert!(config.settings.get("_removed").is_none());
+    assert_eq!(store.source_configs().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn disabled_and_removed_sources_do_not_sync_and_restore_forces_reconciliation() {
+    let harness = Harness::memory();
+    let mut settings = snapshot(vec![record("A", "Alpha", "1")]);
+    settings["checkpoint"] = json!({"cursor":"old"});
+    harness.add_source("source", MIRROR_SOURCE_TYPE, settings);
+    harness.sync_and_project("source").await;
+    assert!(harness
+        .store
+        .source_runtime("source")
+        .unwrap()
+        .checkpoint
+        .is_some());
+
+    let mut config = harness.store.source_config("source").unwrap();
+    config.enabled = false;
+    harness.store.put_source_config(&config).unwrap();
+    assert!(harness.sync.sync("source").await.is_err());
+    assert_eq!(harness.store.stored_work().unwrap().len(), 1);
+
+    config.removed_at = Some(at(11, 0));
+    harness.store.put_source_config(&config).unwrap();
+    assert!(harness.sync.sync("source").await.is_err());
+    assert_eq!(harness.store.stored_work().unwrap().len(), 1);
+
+    config.enabled = true;
+    config.removed_at = None;
+    harness.store.put_source_config(&config).unwrap();
+    let runtime = harness.store.source_runtime("source").unwrap();
+    assert!(runtime.checkpoint.is_none());
+    assert!(runtime.next_sync_at.is_none());
+    assert_eq!(runtime.failure_count, 0);
+    harness.sync_and_project("source").await;
+    assert_eq!(harness.store.source_configs().unwrap().len(), 1);
+    assert_eq!(harness.store.stored_work().unwrap().len(), 1);
 }
 
 #[tokio::test]

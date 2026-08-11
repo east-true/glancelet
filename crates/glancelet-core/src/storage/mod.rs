@@ -147,6 +147,54 @@ impl SqliteWorkStore {
                 )
                 .map_err(storage_error)?;
         }
+        let lifecycle_applied = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=2)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(storage_error)?;
+        if !lifecycle_applied {
+            let removed_column_exists = {
+                let mut statement = transaction
+                    .prepare("PRAGMA table_info(source_configs)")
+                    .map_err(storage_error)?;
+                let columns = statement
+                    .query_map([], |row| row.get::<_, String>(1))
+                    .map_err(storage_error)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(storage_error)?;
+                columns.iter().any(|column| column == "removed_at")
+            };
+            if !removed_column_exists {
+                transaction
+                    .execute_batch("ALTER TABLE source_configs ADD COLUMN removed_at TEXT;")
+                    .map_err(storage_error)?;
+            }
+            transaction
+                .execute(
+                    "UPDATE source_configs
+                     SET enabled=0, removed_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     WHERE json_extract(settings_json, '$._removed')=1 AND removed_at IS NULL",
+                    [],
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "UPDATE source_configs
+                     SET settings_json=json_remove(settings_json, '$._removed')
+                     WHERE json_type(settings_json, '$._removed') IS NOT NULL",
+                    [],
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version, name)
+                     VALUES (2, '002_source_config_lifecycle')",
+                    [],
+                )
+                .map_err(storage_error)?;
+        }
         transaction.commit().map_err(storage_error)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -209,14 +257,25 @@ impl WorkStore for SqliteWorkStore {
     fn put_source_config(&self, config: &SourceConfig) -> Result<()> {
         let mut connection = self.connection.lock().expect("sqlite connection poisoned");
         let transaction = connection.transaction().map_err(storage_error)?;
+        let restoring = transaction
+            .query_row(
+                "SELECT removed_at IS NOT NULL FROM source_configs WHERE id=?1",
+                [&config.id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()
+            .map_err(storage_error)?
+            .unwrap_or(false)
+            && config.removed_at.is_none();
         transaction
             .execute(
                 "INSERT INTO source_configs
                    (id, connection_id, source_type_id, display_name, enabled,
-                    expected_sync_interval_seconds, settings_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    expected_sync_interval_seconds, settings_json, removed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(id) DO UPDATE SET connection_id=?2, source_type_id=?3,
-                   display_name=?4, enabled=?5, expected_sync_interval_seconds=?6, settings_json=?7",
+                   display_name=?4, enabled=?5, expected_sync_interval_seconds=?6,
+                   settings_json=?7, removed_at=?8",
                 params![
                     config.id,
                     config.connection_id,
@@ -224,7 +283,8 @@ impl WorkStore for SqliteWorkStore {
                     config.display_name,
                     config.enabled,
                     config.expected_sync_interval_seconds,
-                    json(&config.settings)?
+                    json(&config.settings)?,
+                    config.removed_at.map(timestamp)
                 ],
             )
             .map_err(storage_error)?;
@@ -234,6 +294,20 @@ impl WorkStore for SqliteWorkStore {
                 [&config.id],
             )
             .map_err(storage_error)?;
+        if restoring {
+            // A removed source can miss an arbitrary amount of provider state. Its
+            // first restored sync must reconcile authoritatively instead of using
+            // a stale provider checkpoint (notably a Google syncToken).
+            transaction
+                .execute(
+                    "UPDATE source_runtime
+                     SET checkpoint_json=NULL, next_sync_at=NULL,
+                         failure_count=0, last_error=NULL
+                     WHERE source_config_id=?1",
+                    [&config.id],
+                )
+                .map_err(storage_error)?;
+        }
         transaction.commit().map_err(storage_error)
     }
 
@@ -242,7 +316,7 @@ impl WorkStore for SqliteWorkStore {
         let mut statement = connection
             .prepare(
                 "SELECT id, connection_id, source_type_id, display_name, enabled,
-                        expected_sync_interval_seconds, settings_json
+                        expected_sync_interval_seconds, settings_json, removed_at
                  FROM source_configs ORDER BY id",
             )
             .map_err(storage_error)?;
@@ -258,7 +332,7 @@ impl WorkStore for SqliteWorkStore {
             .expect("sqlite connection poisoned")
             .query_row(
                 "SELECT id, connection_id, source_type_id, display_name, enabled,
-                        expected_sync_interval_seconds, settings_json
+                        expected_sync_interval_seconds, settings_json, removed_at
                  FROM source_configs WHERE id=?1",
                 [id],
                 source_config_from_row,
@@ -300,7 +374,7 @@ impl WorkStore for SqliteWorkStore {
         &self,
         id: &str,
         now: DateTime<Utc>,
-        next_retry_at: DateTime<Utc>,
+        next_retry_at: Option<DateTime<Utc>>,
         error: &str,
     ) -> Result<()> {
         self.connection
@@ -311,7 +385,21 @@ impl WorkStore for SqliteWorkStore {
                  SET last_attempt_at=?2, next_sync_at=?3,
                      failure_count=failure_count+1, last_error=?4
                  WHERE source_config_id=?1",
-                params![id, timestamp(now), timestamp(next_retry_at), error],
+                params![id, timestamp(now), next_retry_at.map(timestamp), error],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    fn clear_sync_failure(&self, id: &str) -> Result<()> {
+        self.connection
+            .lock()
+            .expect("sqlite connection poisoned")
+            .execute(
+                "UPDATE source_runtime
+                 SET next_sync_at=NULL, failure_count=0, last_error=NULL
+                 WHERE source_config_id=?1",
+                [id],
             )
             .map_err(storage_error)?;
         Ok(())
@@ -961,7 +1049,8 @@ fn stored_work_query(suffix: &str) -> String {
            source_runtime.checkpoint_json, source_runtime.last_attempt_at,
            source_runtime.last_success_at, source_runtime.next_sync_at,
            source_runtime.failure_count, source_runtime.last_error,
-           source_entities.display_json, source_entities.navigation_json
+           source_entities.display_json, source_entities.navigation_json,
+           source_configs.removed_at
          FROM work_entries
          JOIN work_bindings ON work_bindings.work_entry_id=work_entries.id
          JOIN source_entities ON source_entities.id=work_bindings.source_entity_id
@@ -1010,6 +1099,7 @@ fn stored_work_from_row(row: &Row<'_>) -> rusqlite::Result<StoredWork> {
             enabled: row.get(28)?,
             expected_sync_interval_seconds: row.get(29)?,
             settings: parse_column(row, 30)?,
+            removed_at: parse_optional_timestamp_column(row, 43)?,
         },
         connection: Connection {
             id: row.get(31)?,
@@ -1040,6 +1130,7 @@ fn source_config_from_row(row: &Row<'_>) -> rusqlite::Result<SourceConfig> {
         enabled: row.get(4)?,
         expected_sync_interval_seconds: row.get(5)?,
         settings: parse_column(row, 6)?,
+        removed_at: parse_optional_timestamp_column(row, 7)?,
     })
 }
 

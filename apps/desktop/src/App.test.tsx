@@ -64,6 +64,8 @@ test("formats Today using the browser local date rather than UTC", () => {
 test("loads Slack settings through Tauri commands", async () => {
   mocks.invoke
     .mockResolvedValueOnce({ today: [], inbox: [] })
+    .mockResolvedValueOnce([])
+    .mockResolvedValueOnce([])
     .mockResolvedValueOnce([]);
   render(<App />);
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("dashboard"));
@@ -71,5 +73,219 @@ test("loads Slack settings through Tauri commands", async () => {
   await waitFor(() =>
     expect(mocks.invoke).toHaveBeenCalledWith("slack_connections"),
   );
+  expect(mocks.invoke).toHaveBeenCalledWith("notion_connections");
+  expect(mocks.invoke).toHaveBeenCalledWith("google_connections");
   expect(screen.getByText("No Slack workspace connected.")).toBeInTheDocument();
+  expect(screen.getByText("No Notion account connected.")).toBeInTheDocument();
+  expect(screen.getByText("No Google account connected.")).toBeInTheDocument();
+});
+
+test("maps a Notion data source by property id and previews without storing the token", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard")
+      return Promise.resolve({ today: [], inbox: [] });
+    if (command === "slack_connections") return Promise.resolve([]);
+    if (command === "notion_connections") {
+      return Promise.resolve([
+        {
+          connectionId: "notion-1",
+          user: "Tester",
+          status: "connected",
+          sources: [],
+        },
+      ]);
+    }
+    if (command === "google_connections") return Promise.resolve([]);
+    if (command === "notion_data_source_schema") {
+      return Promise.resolve({
+        id: "ds-1",
+        title: "Tasks",
+        properties: [
+          { id: "title", name: "Task", type: "title", status: null },
+          { id: "owner", name: "Owner", type: "people", status: null },
+          {
+            id: "status",
+            name: "Status",
+            type: "status",
+            status: {
+              options: [
+                { id: "open", name: "Open" },
+                { id: "doing", name: "Doing" },
+                { id: "done", name: "Done" },
+              ],
+              groups: [
+                { id: "todo", name: "To-do", optionIds: ["open"] },
+                {
+                  id: "progress",
+                  name: "In progress",
+                  optionIds: ["doing"],
+                },
+                { id: "complete", name: "Complete", optionIds: ["done"] },
+              ],
+            },
+          },
+          { id: "due", name: "Due", type: "date", status: null },
+        ],
+      });
+    }
+    if (command === "preview_notion_source") {
+      return Promise.resolve([
+        {
+          externalId: "page-1",
+          title: "Review API",
+          status: "Open",
+          due: null,
+        },
+      ]);
+    }
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  await screen.findByText("Tester");
+  fireEvent.change(screen.getByLabelText("Notion Data Source ID"), {
+    target: { value: "ds-1" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Load schema" }));
+  await screen.findByText("Mapping: Tasks");
+  fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+  await screen.findByText("Review API");
+
+  expect(mocks.invoke).toHaveBeenCalledWith("preview_notion_source", {
+    connectionId: "notion-1",
+    settings: {
+      dataSourceId: "ds-1",
+      dataSourceName: "Tasks",
+      properties: {
+        title: { id: "title", name: "Task" },
+        assignee: { id: "owner", name: "Owner" },
+        status: { id: "status", name: "Status" },
+        due: { id: "due", name: "Due" },
+      },
+      onlyAssignedToMe: true,
+      activeStatusIds: ["open", "doing"],
+    },
+  });
+});
+
+test("selects multiple calendars for one Google connection", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard")
+      return Promise.resolve({ today: [], inbox: [] });
+    if (command === "slack_connections" || command === "notion_connections")
+      return Promise.resolve([]);
+    if (command === "google_connections") {
+      return Promise.resolve([
+        {
+          connectionId: "google-1",
+          email: "user@example.com",
+          status: "connected",
+          sources: [],
+        },
+      ]);
+    }
+    if (command === "google_calendars") {
+      return Promise.resolve([
+        {
+          id: "work@example.com",
+          summary: "Work",
+          summaryOverride: null,
+          timeZone: "Asia/Seoul",
+          primary: true,
+          selected: true,
+        },
+        {
+          id: "team@example.com",
+          summary: "Engineering",
+          summaryOverride: null,
+          timeZone: "Asia/Seoul",
+          primary: false,
+          selected: false,
+        },
+      ]);
+    }
+    if (command === "save_google_calendars")
+      return Promise.resolve(["source-a", "source-b"]);
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  await screen.findByText("user@example.com");
+  fireEvent.click(screen.getByRole("button", { name: "Refresh calendars" }));
+  await screen.findByLabelText("Work");
+  fireEvent.click(screen.getByLabelText("Engineering"));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Add selected calendars" }),
+  );
+
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("save_google_calendars", {
+      connectionId: "google-1",
+      selections: [
+        { calendarId: "work@example.com" },
+        { calendarId: "team@example.com" },
+      ],
+    }),
+  );
+});
+
+test("manages a Google Calendar source through generic source commands", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard")
+      return Promise.resolve({ today: [], inbox: [] });
+    if (command === "slack_connections" || command === "notion_connections")
+      return Promise.resolve([]);
+    if (command === "google_connections") {
+      return Promise.resolve([
+        {
+          connectionId: "google-1",
+          email: "user@example.com",
+          status: "connected",
+          sources: [
+            {
+              sourceId: "calendar-source",
+              calendarId: "work@example.com",
+              name: "Work",
+              enabled: true,
+              lastSync: null,
+              lastError: null,
+            },
+          ],
+        },
+      ]);
+    }
+    return Promise.resolve(undefined);
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  await screen.findByText("Work");
+  fireEvent.click(screen.getByRole("button", { name: "Sync now" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("sync_source", {
+      sourceId: "calendar-source",
+    }),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Disable" })).toBeEnabled(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Disable" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("update_google_source", {
+      sourceId: "calendar-source",
+      enabled: false,
+    }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Disconnect Google" }),
+    ).toBeEnabled(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Disconnect Google" }));
+  await waitFor(() => {
+    expect(mocks.invoke).toHaveBeenCalledWith("disconnect_google", {
+      connectionId: "google-1",
+    });
+  });
 });

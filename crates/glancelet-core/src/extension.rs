@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -24,7 +25,11 @@ pub struct SourceConfig {
     pub connection_id: String,
     pub source_type_id: SourceTypeId,
     pub display_name: String,
+    /// A reversible pause. Removed configs are never active even if this is true.
     pub enabled: bool,
+    /// History-preserving removal. Re-adding restores this SourceConfig identity.
+    #[serde(default)]
+    pub removed_at: Option<DateTime<Utc>>,
     pub expected_sync_interval_seconds: i64,
     #[serde(default)]
     pub settings: Value,

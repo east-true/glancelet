@@ -286,6 +286,146 @@ h1 {
   flex-wrap: wrap;
   gap: 7px;
 }
+
+.settings-stack {
+  display: grid;
+  gap: calc(var(--gl-spacing) * 1.5);
+}
+
+.source-heading,
+.connection-title,
+.source-row {
+  align-items: center;
+  display: flex;
+  gap: var(--gl-spacing);
+  justify-content: space-between;
+}
+
+.connection-card,
+.calendar-picker,
+.source-row > div:first-child,
+.connection-title > div:first-child {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.connection-card {
+  border-top: 1px solid
+    color-mix(in srgb, var(--gl-text-muted) 25%, transparent);
+  margin-top: var(--gl-spacing);
+  padding-top: var(--gl-spacing);
+}
+
+.connection-title span,
+.source-row span {
+  color: var(--gl-text-muted);
+  font-size: 0.8rem;
+}
+
+.calendar-picker {
+  border: 1px solid color-mix(in srgb, var(--gl-text-muted) 25%, transparent);
+  border-radius: var(--gl-radius);
+  margin: 0;
+  padding: var(--gl-spacing);
+}
+
+.calendar-picker label {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.disconnect-button {
+  justify-self: start;
+}
+
+.notion-connect-heading,
+.token-connect,
+.inline-fields,
+.notion-source-row {
+  align-items: center;
+  display: flex;
+  gap: calc(var(--gl-spacing) * 0.75);
+}
+
+.token-connect input,
+.inline-fields input {
+  min-width: 0;
+}
+
+.notion-card,
+.notion-setup {
+  display: grid;
+  gap: var(--gl-spacing);
+}
+
+.notion-source-row {
+  align-items: flex-start;
+  border-top: 1px solid
+    color-mix(in srgb, var(--gl-text-muted) 20%, transparent);
+  justify-content: space-between;
+  padding-top: var(--gl-spacing);
+}
+
+.notion-source-row > div:first-child {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.notion-source-row span,
+.notion-source-row small,
+.mapped-source-name {
+  color: var(--gl-text-muted);
+}
+
+.search-results {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.notion-setup fieldset {
+  border: 1px solid color-mix(in srgb, var(--gl-text-muted) 25%, transparent);
+  border-radius: var(--gl-radius);
+  display: grid;
+  gap: 0.75rem;
+  margin: 0;
+  padding: var(--gl-spacing);
+}
+
+.status-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.check-row {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.4rem;
+}
+
+.check-row input {
+  width: auto;
+}
+
+.notion-preview ul {
+  margin-bottom: 0;
+}
+
+@media (max-width: 520px) {
+  .notion-connect-heading,
+  .notion-source-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .source-heading,
+  .connection-title,
+  .source-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
 .source-actions .danger {
   color: var(--gl-danger);
 }

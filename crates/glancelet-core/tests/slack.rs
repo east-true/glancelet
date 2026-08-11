@@ -242,6 +242,7 @@ impl SlackHarness {
                 source_type_id: SourceTypeId(SOURCE_TYPE.into()),
                 display_name: "Slack :todo:".into(),
                 enabled: true,
+                removed_at: None,
                 expected_sync_interval_seconds: 120,
                 settings: json!({
                     "team_id": "T1",
@@ -444,9 +445,11 @@ async fn oauth_persists_bundle_only_in_secret_store_and_callback_is_one_time() {
     let server = MockSlack::start(vec![
         MockResponse::ok(json!({
             "ok": true,
-            "access_token": "xoxp-never-in-sqlite",
-            "token_type": "user",
-            "scope": "reactions:read"
+            "authed_user": {
+                "access_token": "xoxp-never-in-sqlite",
+                "token_type": "user",
+                "scope": "reactions:read"
+            }
         })),
         MockResponse::ok(json!({
             "ok": true,
@@ -466,6 +469,7 @@ async fn oauth_persists_bundle_only_in_secret_store_and_callback_is_one_time() {
     let authorization = oauth.finish(&start.state, "one-time-code").await.unwrap();
     assert_eq!(authorization.identity.team_id, "T1");
     assert!(oauth.finish(&start.state, "replay").await.is_err());
+    assert!(server.requests().await[0].starts_with("POST /oauth.v2.access "));
 
     let secrets = Arc::new(InMemorySecretStore::new());
     let tokens = SlackTokenProvider::new("client-id", client, secrets.clone(), clock);
