@@ -4,7 +4,12 @@ export type WorkKind = "action" | "event" | "attention";
 export type WorkProgress = "todo" | "doing" | "done";
 export type Freshness = "never_synced" | "fresh" | "stale";
 export type SyncFailureKind =
-  "authentication_required" | "rate_limited" | "other";
+  | "authentication_required"
+  | "configuration_required"
+  | "rate_limited"
+  | "transient_network"
+  | "provider_failure"
+  | "other";
 
 export interface SyncSourceSuccess {
   sourceId: string;

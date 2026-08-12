@@ -118,7 +118,10 @@ impl SyncReport {
 fn sync_failure_kind(error: &GlanceletError) -> SourceFailureKind {
     match error {
         GlanceletError::AuthenticationRequired(_) => SourceFailureKind::AuthenticationRequired,
+        GlanceletError::ConfigurationRequired(_) => SourceFailureKind::ConfigurationRequired,
         GlanceletError::RateLimited { .. } => SourceFailureKind::RateLimited,
+        GlanceletError::TransientNetwork(_) => SourceFailureKind::TransientNetwork,
+        GlanceletError::ProviderFailure(_) => SourceFailureKind::ProviderFailure,
         _ => SourceFailureKind::Other,
     }
 }
@@ -252,7 +255,7 @@ impl AppServices {
                     .store
                     .source_runtime(&config.id)
                     .map_err(|error| error.to_string())?;
-                if runtime.authentication_required()
+                if runtime.automatic_retry_blocked()
                     || runtime
                         .next_sync_at
                         .is_some_and(|next_sync| next_sync > self.clock.now())

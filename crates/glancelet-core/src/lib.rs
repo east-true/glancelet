@@ -12,6 +12,12 @@ pub enum GlanceletError {
     Storage(String),
     #[error("source error: {0}")]
     Source(String),
+    #[error("source configuration is required: {0}")]
+    ConfigurationRequired(String),
+    #[error("transient network error: {0}")]
+    TransientNetwork(String),
+    #[error("provider failure: {0}")]
+    ProviderFailure(String),
     #[error("unknown source type: {0}")]
     UnknownSource(String),
     #[error("invalid operation: {0}")]

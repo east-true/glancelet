@@ -114,7 +114,7 @@ fn migration_baseline_handles_fresh_legacy_and_reopened_databases() {
     let path = directory.path().join("migration.db");
     {
         let store = SqliteWorkStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 4);
+        assert_eq!(store.schema_version().unwrap(), 5);
     }
     {
         let connection = rusqlite::Connection::open(&path).unwrap();
@@ -181,7 +181,7 @@ fn source_lifecycle_migration_preserves_history_and_moves_legacy_remove_marker()
     }
     let store = SqliteWorkStore::open(&path).unwrap();
     let config = store.source_config("source").unwrap();
-    assert_eq!(store.schema_version().unwrap(), 4);
+    assert_eq!(store.schema_version().unwrap(), 5);
     assert!(!config.enabled);
     assert!(config.removed_at.is_some());
     assert!(config.settings.get("_removed").is_none());

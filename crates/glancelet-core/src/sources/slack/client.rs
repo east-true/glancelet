@@ -131,10 +131,16 @@ impl SlackApiClient {
             });
         }
         if !response.status().is_success() {
-            return Err(GlanceletError::Source(format!(
-                "Slack HTTP request failed with status {}",
-                response.status()
-            )));
+            let status = response.status();
+            return Err(if status.is_server_error() {
+                GlanceletError::ProviderFailure(format!(
+                    "Slack HTTP request failed with status {status}"
+                ))
+            } else {
+                GlanceletError::ConfigurationRequired(format!(
+                    "Slack rejected the request with status {status}"
+                ))
+            });
         }
         let value: Value = response.json().await.map_err(network_error)?;
         if value.get("ok").and_then(Value::as_bool) != Some(true) {
@@ -299,22 +305,25 @@ fn api_error(code: &str) -> GlanceletError {
         | "invalid_refresh_token" => GlanceletError::AuthenticationRequired(
             "Slack connection must be authorized again".into(),
         ),
-        "missing_scope" | "no_permission" => {
-            GlanceletError::Source("Slack reactions:read permission is missing".into())
-        }
-        "ratelimited" => GlanceletError::Source("Slack rate limited the request".into()),
-        _ => GlanceletError::Source(format!("Slack API error: {code}")),
+        "missing_scope" | "no_permission" => GlanceletError::ConfigurationRequired(
+            "Slack reactions:read permission is missing".into(),
+        ),
+        "ratelimited" => GlanceletError::RateLimited {
+            provider: "Slack".into(),
+            retry_after_seconds: 60,
+        },
+        _ => GlanceletError::ProviderFailure(format!("Slack API error: {code}")),
     }
 }
 
 fn malformed(message: &str) -> GlanceletError {
-    GlanceletError::Source(message.into())
+    GlanceletError::ProviderFailure(message.into())
 }
 
 fn network_error(error: reqwest::Error) -> GlanceletError {
     if error.is_timeout() {
-        GlanceletError::Source("Slack request timed out".into())
+        GlanceletError::TransientNetwork("Slack request timed out".into())
     } else {
-        GlanceletError::Source("Slack network request failed".into())
+        GlanceletError::TransientNetwork("Slack network request failed".into())
     }
 }

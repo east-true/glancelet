@@ -5,7 +5,7 @@ use chrono::{Duration, TimeZone, Utc};
 use glancelet_core::{
     application::{
         Clock, ConnectionCommandService, FixedClock, InMemorySecretStore, SecretStore,
-        SourceChangeProcessor, SyncCoordinator, WorkCommandService, WorkStore,
+        SourceChangeProcessor, SourceFailureKind, SyncCoordinator, WorkCommandService, WorkStore,
     },
     domain::{
         ProgressAuthority, ProviderId, SourceBatch, SourceBatchKind, SourceChange, SourceEntity,
@@ -651,4 +651,279 @@ fn provider_registration_is_atomic() {
     assert!(registry
         .adapter(&SourceTypeId("would.have.been.inserted".into()))
         .is_err());
+}
+
+#[derive(Clone, Copy)]
+enum RetryFailure {
+    Configuration,
+    RateLimited,
+    Transient,
+    Provider,
+}
+
+struct RetryAdapter {
+    failure: RetryFailure,
+}
+
+#[async_trait]
+impl SourceAdapter for RetryAdapter {
+    async fn fetch(
+        &self,
+        _config: &SourceConfig,
+        _checkpoint: Option<Value>,
+    ) -> Result<SourceBatch> {
+        Err(match self.failure {
+            RetryFailure::Configuration => {
+                GlanceletError::ConfigurationRequired("fix the source mapping".into())
+            }
+            RetryFailure::RateLimited => GlanceletError::RateLimited {
+                provider: "Retry test".into(),
+                retry_after_seconds: 77,
+            },
+            RetryFailure::Transient => {
+                GlanceletError::TransientNetwork("temporary network failure".into())
+            }
+            RetryFailure::Provider => {
+                GlanceletError::ProviderFailure("temporary provider failure".into())
+            }
+        })
+    }
+}
+
+fn retry_registration(failure: RetryFailure) -> ProviderRegistration {
+    ProviderRegistration {
+        provider_id: ProviderId("retry".into()),
+        display_name: "Retry".into(),
+        sources: vec![SourceRegistration {
+            descriptor: SourceDescriptor {
+                source_type_id: SourceTypeId("retry.source".into()),
+                display_name: "Retry source".into(),
+                description: "Exercises retry policy".into(),
+            },
+            adapter: Arc::new(RetryAdapter { failure }),
+            projector: Arc::new(ReviewProjector),
+        }],
+    }
+}
+
+async fn retry_harness(
+    failure: RetryFailure,
+) -> (Arc<SqliteWorkStore>, Arc<FixedClock>, SyncCoordinator) {
+    let store = Arc::new(SqliteWorkStore::in_memory().unwrap());
+    put_source(&store, "retry", "retry.source", json!({ "revision": 1 }));
+    let mut registry = ExtensionRegistry::new();
+    registry.register(retry_registration(failure)).unwrap();
+    let registry = Arc::new(registry);
+    let clock = Arc::new(FixedClock::new(now()));
+    let store_port: Arc<dyn WorkStore> = store.clone();
+    let clock_port: Arc<dyn Clock> = clock.clone();
+    let sync = SyncCoordinator::new(store_port, registry, clock_port);
+    (store, clock, sync)
+}
+
+#[tokio::test]
+async fn transient_and_provider_failures_back_off_progressively() {
+    for failure in [RetryFailure::Transient, RetryFailure::Provider] {
+        let (store, clock, sync) = retry_harness(failure).await;
+        assert!(sync.sync("source").await.is_err());
+        let first = store.source_runtime("source").unwrap();
+        assert!(matches!(
+            first.failure_kind,
+            Some(SourceFailureKind::TransientNetwork | SourceFailureKind::ProviderFailure)
+        ));
+        let first_delay = first.next_sync_at.unwrap() - clock.now();
+        assert!(first_delay >= Duration::seconds(60));
+
+        clock.set(clock.now() + Duration::seconds(1));
+        assert!(sync.sync("source").await.is_err());
+        let second = store.source_runtime("source").unwrap();
+        let second_delay = second.next_sync_at.unwrap() - clock.now();
+        assert_eq!(second.failure_count, 2);
+        assert!(second_delay > first_delay);
+        assert!(second_delay <= Duration::hours(6));
+    }
+}
+
+#[tokio::test]
+async fn rate_limits_honor_retry_after_and_configuration_changes_resume() {
+    let (rate_store, rate_clock, rate_sync) = retry_harness(RetryFailure::RateLimited).await;
+    assert!(rate_sync.sync("source").await.is_err());
+    let rate_runtime = rate_store.source_runtime("source").unwrap();
+    assert_eq!(
+        rate_runtime.failure_kind,
+        Some(SourceFailureKind::RateLimited)
+    );
+    assert_eq!(
+        rate_runtime.next_sync_at.unwrap() - rate_clock.now(),
+        Duration::seconds(77)
+    );
+
+    let (store, _clock, sync) = retry_harness(RetryFailure::Configuration).await;
+    assert!(sync.sync("source").await.is_err());
+    let blocked = store.source_runtime("source").unwrap();
+    assert_eq!(
+        blocked.failure_kind,
+        Some(SourceFailureKind::ConfigurationRequired)
+    );
+    assert!(blocked.next_sync_at.is_none());
+    assert!(blocked.automatic_retry_blocked());
+
+    let mut config = store.source_config("source").unwrap();
+    config.settings = json!({ "revision": 2 });
+    store.put_source_config(&config).unwrap();
+    let resumed = store.source_runtime("source").unwrap();
+    assert_eq!(resumed.failure_count, 0);
+    assert!(resumed.failure_kind.is_none());
+    assert!(!resumed.automatic_retry_blocked());
+}
+
+#[tokio::test]
+async fn terminal_projection_failure_is_quarantined_without_blocking_newer_state() {
+    let store = Arc::new(SqliteWorkStore::in_memory().unwrap());
+    put_source(&store, REVIEW_PROVIDER, REVIEW_SOURCE, json!({}));
+    let mut registry = ExtensionRegistry::new();
+    registry.register(review_registration()).unwrap();
+    let registry = Arc::new(registry);
+    let clock = Arc::new(FixedClock::new(now()));
+    let store_port: Arc<dyn WorkStore> = store.clone();
+    let clock_port: Arc<dyn Clock> = clock.clone();
+    let sync = SyncCoordinator::new(
+        Arc::clone(&store_port),
+        Arc::clone(&registry),
+        Arc::clone(&clock_port),
+    );
+    let changes = SourceChangeProcessor::new(store_port, registry, clock_port);
+
+    assert_eq!(sync.sync("source").await.unwrap(), 2);
+    for attempt in 1..=5 {
+        let error = changes.process_pending(10).unwrap_err();
+        assert!(error.to_string().contains("poison projection"));
+        if attempt < 5 {
+            clock.set(clock.now() + Duration::hours(7));
+        }
+    }
+    assert!(store
+        .pending_source_changes_at(10, clock.now() + Duration::days(30))
+        .unwrap()
+        .is_empty());
+
+    let (config, runtime) = store.source_sync_state("source").unwrap();
+    store
+        .apply_source_batch(
+            &config,
+            runtime.config_revision,
+            &SourceBatch {
+                kind: SourceBatchKind::Delta,
+                mutations: vec![SourceMutation::Upsert(SourceRecord {
+                    identity: SourceIdentity {
+                        entity_type: "review".into(),
+                        external_id: "poison".into(),
+                    },
+                    title: "Recovered".into(),
+                    revision: "2".into(),
+                    display: json!({}),
+                    metadata: json!({}),
+                    navigation: json!({}),
+                })],
+                next_checkpoint: None,
+            },
+            clock.now(),
+        )
+        .unwrap();
+    let report = changes.drain_pending(10, 100).unwrap();
+    assert_eq!(report.processed, 1);
+    assert!(report.failures.is_empty());
+    let titles = store
+        .stored_work()
+        .unwrap()
+        .into_iter()
+        .map(|work| work.entry.title)
+        .collect::<Vec<_>>();
+    assert!(titles.contains(&"Valid".to_owned()));
+    assert!(titles.contains(&"Recovered".to_owned()));
+}
+
+struct RecoveringProjector;
+
+impl WorkProjector for RecoveringProjector {
+    fn version(&self) -> i32 {
+        2
+    }
+
+    fn project(&self, entity: &SourceEntity, _change: &SourceChange) -> Result<WorkDraft> {
+        Ok(WorkDraft {
+            kind: WorkKind::Action,
+            title: entity.title.clone(),
+            summary: None,
+            priority: None,
+            progress: Some(WorkProgress::Todo),
+            start: None,
+            end: None,
+            due: None,
+            dimensions: json!({}),
+            facets: json!({}),
+            binding_mode: WorkBindingMode::Capture,
+            progress_authority: ProgressAuthority::Local,
+        })
+    }
+}
+
+fn recovering_registration() -> ProviderRegistration {
+    ProviderRegistration {
+        provider_id: ProviderId(REVIEW_PROVIDER.into()),
+        display_name: "Review".into(),
+        sources: vec![SourceRegistration {
+            descriptor: SourceDescriptor {
+                source_type_id: SourceTypeId(REVIEW_SOURCE.into()),
+                display_name: "Review source".into(),
+                description: "Recovers quarantined projections".into(),
+            },
+            adapter: Arc::new(ReviewAdapter),
+            projector: Arc::new(RecoveringProjector),
+        }],
+    }
+}
+
+#[tokio::test]
+async fn projector_upgrade_supersedes_quarantined_snapshot_with_current_entity() {
+    let store = Arc::new(SqliteWorkStore::in_memory().unwrap());
+    put_source(&store, REVIEW_PROVIDER, REVIEW_SOURCE, json!({}));
+    let mut registry = ExtensionRegistry::new();
+    registry.register(review_registration()).unwrap();
+    let registry = Arc::new(registry);
+    let clock = Arc::new(FixedClock::new(now()));
+    let store_port: Arc<dyn WorkStore> = store.clone();
+    let clock_port: Arc<dyn Clock> = clock.clone();
+    let sync = SyncCoordinator::new(
+        Arc::clone(&store_port),
+        Arc::clone(&registry),
+        Arc::clone(&clock_port),
+    );
+    let changes =
+        SourceChangeProcessor::new(Arc::clone(&store_port), registry, Arc::clone(&clock_port));
+
+    sync.sync("source").await.unwrap();
+    for attempt in 1..=5 {
+        assert!(changes.process_pending(10).is_err());
+        if attempt < 5 {
+            clock.set(clock.now() + Duration::hours(7));
+        }
+    }
+
+    let mut upgraded = ExtensionRegistry::new();
+    upgraded.register(recovering_registration()).unwrap();
+    let upgraded = Arc::new(upgraded);
+    let processor = SourceChangeProcessor::new(store_port, upgraded, clock_port);
+    let report = processor.drain_pending(10, 100).unwrap();
+    assert_eq!(report.processed, 2);
+    assert!(report.failures.is_empty());
+    let titles = store
+        .stored_work()
+        .unwrap()
+        .into_iter()
+        .map(|work| work.entry.title)
+        .collect::<Vec<_>>();
+    assert!(titles.contains(&"Poison".to_owned()));
+    assert!(titles.contains(&"Valid".to_owned()));
+    assert!(processor.drain_pending(10, 100).unwrap().attempted == 0);
 }
