@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use rand::{rng, RngCore};
+use rand::{rng, Rng};
 use sha2::{Digest, Sha256};
 
 pub(crate) struct PkcePair {
