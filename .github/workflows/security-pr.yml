@@ -48,7 +48,7 @@ jobs:
         with:
           scan-args: |-
             --format=json
-            --output=old-results.json
+            --output-file=old-results.json
             -r
             ./
 
@@ -61,9 +61,50 @@ jobs:
         with:
           scan-args: |-
             --format=json
-            --output=new-results.json
+            --output-file=new-results.json
             -r
             ./
+
+      - name: Summarize current dependency vulnerabilities
+        if: always()
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+
+          path = Path("new-results.json")
+          if not path.exists():
+              print("OSV result file was not produced.")
+              raise SystemExit(0)
+
+          data = json.loads(path.read_text())
+          findings = []
+          for result in data.get("results", []):
+              source = result.get("source", {}).get("path", "unknown")
+              for item in result.get("packages", []):
+                  package = item.get("package", {})
+                  groups = item.get("groups", [])
+                  if groups:
+                      identifiers = [" / ".join(group.get("ids", [])) for group in groups]
+                  else:
+                      identifiers = [vuln.get("id", "unknown") for vuln in item.get("vulnerabilities", [])]
+                  for identifiers_text in identifiers:
+                      findings.append(
+                          (
+                              package.get("ecosystem", "unknown"),
+                              package.get("name", "unknown"),
+                              package.get("version", "unknown"),
+                              identifiers_text,
+                              source,
+                          )
+                      )
+
+          if not findings:
+              print("No known dependency vulnerabilities in the proposed tree.")
+          else:
+              print(f"Current dependency vulnerability groups: {len(findings)}")
+              for ecosystem, name, version, identifiers, source in sorted(findings):
+                  print(f"- {ecosystem} {name}@{version}: {identifiers} ({source})")
 
       - name: Fail on newly introduced vulnerabilities
         uses: google/osv-scanner-action/osv-reporter-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
