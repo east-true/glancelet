@@ -133,13 +133,13 @@ export default function App() {
     try {
       setError(null);
       const report = await glanceletApi.sync();
+      setError(syncReportMessage(report));
       await Promise.all([
         refresh(false),
         tabRef.current === "settings"
           ? refreshSources(false)
           : Promise.resolve(),
       ]);
-      setError(syncReportMessage(report));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -235,6 +235,7 @@ export default function App() {
             connections={slackConnections}
             connect={connectSlack}
             refresh={refreshSlack}
+            refreshWork={refresh}
             setError={setError}
           />
           <NotionSettings
@@ -289,8 +290,8 @@ function NotionSettings({
 }: {
   busy: boolean;
   connections: NotionConnection[];
-  refresh: () => Promise<void>;
-  refreshWork: () => Promise<void>;
+  refresh: (clearError?: boolean) => Promise<void>;
+  refreshWork: (clearError?: boolean) => Promise<void>;
   setError: (error: string | null) => void;
 }) {
   const [token, setToken] = useState("");
@@ -358,8 +359,8 @@ function NotionConnectionCard({
   setError,
 }: {
   connection: NotionConnection;
-  refresh: () => Promise<void>;
-  refreshWork: () => Promise<void>;
+  refresh: (clearError?: boolean) => Promise<void>;
+  refreshWork: (clearError?: boolean) => Promise<void>;
   setError: (error: string | null) => void;
 }) {
   const [working, setWorking] = useState(false);
@@ -488,8 +489,8 @@ function NotionConnectionCard({
               onClick={() =>
                 void action(async () => {
                   const report = await glanceletApi.syncSource(source.sourceId);
-                  await Promise.all([refresh(), refreshWork()]);
                   setError(syncReportMessage(report));
+                  await Promise.all([refresh(false), refreshWork(false)]);
                 })
               }
             >
@@ -898,12 +899,14 @@ function SlackSettings({
   connections,
   connect,
   refresh,
+  refreshWork,
   setError,
 }: {
   busy: boolean;
   connections: SlackConnection[];
   connect: () => Promise<void>;
-  refresh: () => Promise<void>;
+  refresh: (clearError?: boolean) => Promise<void>;
+  refreshWork: (clearError?: boolean) => Promise<void>;
   setError: (error: string | null) => void;
 }) {
   return (
@@ -925,6 +928,7 @@ function SlackSettings({
             key={connection.connectionId}
             connection={connection}
             refresh={refresh}
+            refreshWork={refreshWork}
             setError={setError}
           />
         ))
@@ -936,22 +940,37 @@ function SlackSettings({
 function SlackConnectionCard({
   connection,
   refresh,
+  refreshWork,
   setError,
 }: {
   connection: SlackConnection;
-  refresh: () => Promise<void>;
+  refresh: (clearError?: boolean) => Promise<void>;
+  refreshWork: (clearError?: boolean) => Promise<void>;
   setError: (error: string | null) => void;
 }) {
   const [reaction, setReaction] = useState(connection.reactionName);
   const [working, setWorking] = useState(false);
 
-  async function action(task: () => Promise<string | null | void>) {
+  async function action(task: () => Promise<void>) {
     setWorking(true);
     try {
       setError(null);
-      const message = await task();
-      await refresh();
-      if (message) setError(message);
+      await task();
+      await refresh(false);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function syncSource(sourceId: string) {
+    setWorking(true);
+    try {
+      setError(null);
+      const report = await glanceletApi.syncSource(sourceId);
+      setError(syncReportMessage(report));
+      await Promise.all([refresh(false), refreshWork(false)]);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -986,15 +1005,7 @@ function SlackConnectionCard({
           <>
             <button
               disabled={working || !connection.enabled}
-              onClick={() =>
-                void action(async () =>
-                  syncReportMessage(
-                    await glanceletApi.syncSource(
-                      connection.sourceId as string,
-                    ),
-                  ),
-                )
-              }
+              onClick={() => void syncSource(connection.sourceId as string)}
             >
               Sync now
             </button>

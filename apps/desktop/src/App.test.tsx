@@ -553,6 +553,91 @@ test("disables a work card while its command is pending", async () => {
   await waitFor(() => expect(complete).toBeEnabled());
 });
 
+test("refreshes the HUD after a Slack source sync", async () => {
+  let dashboardCalls = 0;
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard") {
+      dashboardCalls += 1;
+      return Promise.resolve(
+        dashboardCalls === 1
+          ? { today: [], inbox: [] }
+          : dashboardWith("Captured after Slack sync"),
+      );
+    }
+    if (command === "slack_connections") {
+      return Promise.resolve([
+        {
+          connectionId: "slack-1",
+          sourceId: "slack-source",
+          workspace: "Example workspace",
+          user: "Tester",
+          reactionName: "todo",
+          enabled: true,
+          status: "connected",
+          lastSync: null,
+          lastError: null,
+        },
+      ]);
+    }
+    if (command === "notion_connections" || command === "google_connections") {
+      return Promise.resolve([]);
+    }
+    if (command === "sync_source") {
+      return Promise.resolve({
+        refreshRequired: true,
+        succeeded: [
+          {
+            sourceId: "slack-source",
+            sourceName: "Slack :todo:",
+            changedEntities: 1,
+          },
+        ],
+        failed: [],
+        projectionFailures: [],
+      });
+    }
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  await screen.findByText("Example workspace");
+  fireEvent.click(screen.getByRole("button", { name: "Sync now" }));
+  fireEvent.click(screen.getByRole("button", { name: /^Today/ }));
+
+  await screen.findByText("Captured after Slack sync");
+  expect(mocks.invoke).toHaveBeenCalledWith("sync_source", {
+    sourceId: "slack-source",
+  });
+});
+
+test("does not hide a dashboard refresh failure after sync", async () => {
+  let dashboardCalls = 0;
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard") {
+      dashboardCalls += 1;
+      return dashboardCalls === 1
+        ? Promise.resolve({ today: [], inbox: [] })
+        : Promise.reject(new Error("dashboard refresh failed"));
+    }
+    if (command === "sync_all") {
+      return Promise.resolve({
+        refreshRequired: true,
+        succeeded: [],
+        failed: [],
+        projectionFailures: [],
+      });
+    }
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sync" }));
+
+  await screen.findByText(/dashboard refresh failed/);
+  expect(screen.getByRole("button", { name: "Sync" })).toBeEnabled();
+});
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;

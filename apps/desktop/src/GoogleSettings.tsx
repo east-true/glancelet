@@ -15,8 +15,8 @@ export function GoogleSettings({
 }: {
   busy: boolean;
   connections: GoogleConnection[];
-  refresh: () => Promise<void>;
-  refreshWork: () => Promise<void>;
+  refresh: (clearError?: boolean) => Promise<void>;
+  refreshWork: (clearError?: boolean) => Promise<void>;
   setError: (value: string | null) => void;
 }) {
   async function connect() {
@@ -64,8 +64,8 @@ function GoogleConnectionCard({
   setError,
 }: {
   connection: GoogleConnection;
-  refresh: () => Promise<void>;
-  refreshWork: () => Promise<void>;
+  refresh: (clearError?: boolean) => Promise<void>;
+  refreshWork: (clearError?: boolean) => Promise<void>;
   setError: (value: string | null) => void;
 }) {
   const [calendars, setCalendars] = useState<GoogleCalendar[]>([]);
@@ -113,8 +113,8 @@ function GoogleConnectionCard({
     try {
       setError(null);
       const report = await glanceletApi.syncSource(sourceId);
-      await Promise.all([refresh(), refreshWork()]);
       setError(syncReportMessage(report));
+      await Promise.all([refresh(false), refreshWork(false)]);
     } catch (reason) {
       setError(String(reason));
     } finally {
