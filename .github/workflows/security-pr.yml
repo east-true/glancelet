@@ -29,17 +29,47 @@ jobs:
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
 
   dependency-vulnerabilities:
-    name: Dependency vulnerabilities
+    name: New dependency vulnerabilities
     permissions:
       contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          fetch-depth: 0
           persist-credentials: false
-      - name: Scan lockfiles with OSV
+
+      - name: Checkout pull request base
+        run: git checkout --detach "${{ github.event.pull_request.base.sha }}"
+
+      - name: Scan base dependencies
         uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        continue-on-error: true
         with:
           scan-args: |-
+            --format=json
+            --output=old-results.json
             -r
             ./
+
+      - name: Checkout pull request head
+        run: git checkout --detach -f "${{ github.event.pull_request.head.sha }}"
+
+      - name: Scan proposed dependencies
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        continue-on-error: true
+        with:
+          scan-args: |-
+            --format=json
+            --output=new-results.json
+            -r
+            ./
+
+      - name: Fail on newly introduced vulnerabilities
+        uses: google/osv-scanner-action/osv-reporter-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        with:
+          scan-args: |-
+            --old=old-results.json
+            --new=new-results.json
+            --gh-annotations=true
+            --fail-on-vuln=true
