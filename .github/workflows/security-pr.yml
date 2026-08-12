@@ -1,0 +1,116 @@
+name: PR Security
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: Secret scan
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan for leaked secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+
+  dependency-vulnerabilities:
+    name: New dependency vulnerabilities
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout pull request base
+        run: git checkout --detach "${{ github.event.pull_request.base.sha }}"
+
+      - name: Scan base dependencies
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        continue-on-error: true
+        with:
+          scan-args: |-
+            --format=json
+            --output-file=old-results.json
+            -r
+            ./
+
+      - name: Checkout pull request head
+        run: git checkout --detach -f "${{ github.event.pull_request.head.sha }}"
+
+      - name: Scan proposed dependencies
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        continue-on-error: true
+        with:
+          scan-args: |-
+            --format=json
+            --output-file=new-results.json
+            -r
+            ./
+
+      - name: Summarize current dependency vulnerabilities
+        if: always()
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+
+          path = Path("new-results.json")
+          if not path.exists():
+              print("OSV result file was not produced.")
+              raise SystemExit(0)
+
+          data = json.loads(path.read_text())
+          findings = []
+          for result in data.get("results", []):
+              source = result.get("source", {}).get("path", "unknown")
+              for item in result.get("packages", []):
+                  package = item.get("package", {})
+                  groups = item.get("groups", [])
+                  if groups:
+                      identifiers = [" / ".join(group.get("ids", [])) for group in groups]
+                  else:
+                      identifiers = [vuln.get("id", "unknown") for vuln in item.get("vulnerabilities", [])]
+                  for identifiers_text in identifiers:
+                      findings.append(
+                          (
+                              package.get("ecosystem", "unknown"),
+                              package.get("name", "unknown"),
+                              package.get("version", "unknown"),
+                              identifiers_text,
+                              source,
+                          )
+                      )
+
+          if not findings:
+              print("No known dependency vulnerabilities in the proposed tree.")
+          else:
+              print(f"Current dependency vulnerability groups: {len(findings)}")
+              for ecosystem, name, version, identifiers, source in sorted(findings):
+                  print(f"- {ecosystem} {name}@{version}: {identifiers} ({source})")
+
+      - name: Fail on newly introduced vulnerabilities
+        uses: google/osv-scanner-action/osv-reporter-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        with:
+          scan-args: |-
+            --old=old-results.json
+            --new=new-results.json
+            --gh-annotations=true
+            --fail-on-vuln=true
