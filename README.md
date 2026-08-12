@@ -32,6 +32,8 @@ cargo test --workspace
 npm test
 npm run build
 npm run tauri dev
+# Include the development-only fake sources explicitly when needed:
+npm run tauri -- dev --features demo-sources
 ```
 
 The desktop app stores work data in the platform app-data directory as `glancelet.db`. Provider credentials are stored only in the operating system credential store, never in SQLite.

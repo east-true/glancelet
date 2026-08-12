@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -9,10 +10,15 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "./App";
 import { localDateString } from "./local-time";
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 
-beforeEach(() => mocks.invoke.mockReset());
+beforeEach(() => {
+  mocks.invoke.mockReset();
+  mocks.listen.mockReset();
+  mocks.listen.mockResolvedValue(() => undefined);
+});
 afterEach(cleanup);
 
 test("renders the presentation-safe WorkView returned by the application", async () => {
@@ -288,4 +294,116 @@ test("manages a Google Calendar source through generic source commands", async (
       connectionId: "google-1",
     });
   });
+});
+
+test("refreshes the HUD when the backend invalidates work", async () => {
+  let invalidate: (() => void) | undefined;
+  let dashboardCalls = 0;
+  mocks.listen.mockImplementation(
+    async (_event: string, handler: () => void) => {
+      invalidate = handler;
+      return () => undefined;
+    },
+  );
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command !== "dashboard") return Promise.resolve([]);
+    dashboardCalls += 1;
+    if (dashboardCalls === 1) return Promise.resolve({ today: [], inbox: [] });
+    return Promise.resolve({
+      today: [
+        {
+          id: "background-work",
+          kind: "attention",
+          title: "Arrived in background",
+          summary: null,
+          priority: null,
+          lifecycle: "active",
+          progress: null,
+          planning: null,
+          disposition: "normal",
+          pinned: false,
+          snoozedUntil: null,
+          start: null,
+          end: null,
+          due: null,
+          source: {
+            providerId: "test",
+            providerName: "Test",
+            sourceName: "Test",
+            configName: "Test",
+          },
+          canNavigate: false,
+          freshness: "fresh",
+          dimensions: {},
+          facets: {},
+          availableActions: ["dismiss"],
+        },
+      ],
+      inbox: [],
+    });
+  });
+
+  render(<App />);
+  await waitFor(() => expect(invalidate).toBeDefined());
+  await act(async () => invalidate?.());
+  await screen.findByText("Arrived in background");
+});
+
+test("does not send assigned-to-me mode without an assignee mapping", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard")
+      return Promise.resolve({ today: [], inbox: [] });
+    if (command === "slack_connections" || command === "google_connections") {
+      return Promise.resolve([]);
+    }
+    if (command === "notion_connections") {
+      return Promise.resolve([
+        {
+          connectionId: "notion-1",
+          user: "Tester",
+          status: "connected",
+          sources: [],
+        },
+      ]);
+    }
+    if (command === "notion_data_source_schema") {
+      return Promise.resolve({
+        id: "ds-1",
+        title: "Tasks",
+        properties: [
+          { id: "title", name: "Task", type: "title", status: null },
+        ],
+      });
+    }
+    if (command === "preview_notion_source") return Promise.resolve([]);
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  await screen.findByText("Tester");
+  fireEvent.change(screen.getByLabelText("Notion Data Source ID"), {
+    target: { value: "ds-1" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Load schema" }));
+  await screen.findByText("Mapping: Tasks");
+  fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("preview_notion_source", {
+      connectionId: "notion-1",
+      settings: {
+        dataSourceId: "ds-1",
+        dataSourceName: "Tasks",
+        properties: {
+          title: { id: "title", name: "Task" },
+          assignee: null,
+          status: null,
+          due: null,
+        },
+        onlyAssignedToMe: false,
+        activeStatusIds: [],
+      },
+    }),
+  );
 });

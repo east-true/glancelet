@@ -259,12 +259,29 @@ impl WorkCommandService {
     }
 
     pub fn start_work(&self, id: &str) -> Result<()> {
-        self.require_local_progress(id)?;
+        let work = self.require_local_progress(id)?;
+        if work.entry.lifecycle != WorkLifecycle::Active
+            || work.entry.progress != Some(WorkProgress::Todo)
+        {
+            return Err(GlanceletError::InvalidOperation(
+                "work can only be started from active todo progress".into(),
+            ));
+        }
         self.apply(id, WorkMutation::SetProgress(WorkProgress::Doing))
     }
 
     pub fn complete(&self, id: &str) -> Result<()> {
-        self.require_local_progress(id)?;
+        let work = self.require_local_progress(id)?;
+        if work.entry.lifecycle != WorkLifecycle::Active
+            || !matches!(
+                work.entry.progress,
+                Some(WorkProgress::Todo) | Some(WorkProgress::Doing)
+            )
+        {
+            return Err(GlanceletError::InvalidOperation(
+                "work can only be completed from active todo or doing progress".into(),
+            ));
+        }
         self.apply(id, WorkMutation::SetProgress(WorkProgress::Done))
     }
 
@@ -277,14 +294,14 @@ impl WorkCommandService {
         Ok(())
     }
 
-    fn require_local_progress(&self, id: &str) -> Result<()> {
+    fn require_local_progress(&self, id: &str) -> Result<StoredWork> {
         let work = self.store.stored_work_by_id(id)?;
         if work.binding.progress_authority != ProgressAuthority::Local {
             return Err(GlanceletError::InvalidOperation(
                 "progress is not locally controlled".into(),
             ));
         }
-        Ok(())
+        Ok(work)
     }
 
     fn apply(&self, id: &str, mutation: WorkMutation) -> Result<()> {

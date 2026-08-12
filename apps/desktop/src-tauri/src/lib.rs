@@ -8,14 +8,16 @@ use std::{
 };
 
 use chrono::{DateTime, NaiveDate, Utc};
+#[cfg(feature = "demo-sources")]
+use glancelet_core::sources::fake::{self, CAPTURE_SOURCE_TYPE, MIRROR_SOURCE_TYPE};
 use glancelet_core::{
     application::{
-        Clock, NavigationService, SecretStore, SourceChangeProcessor, SyncCoordinator, SystemClock,
-        TimeContext, WorkCommandService, WorkDashboard, WorkReadService, WorkStore,
+        Clock, ConnectionCommandService, NavigationService, SecretStore, SourceChangeProcessor,
+        SyncCoordinator, SystemClock, TimeContext, WorkCommandService, WorkDashboard,
+        WorkReadService, WorkStore,
     },
     domain::{ProviderId, SourceTypeId},
     extension::{Connection, ExtensionRegistry, SourceConfig},
-    sources::fake::{self, CAPTURE_SOURCE_TYPE, MIRROR_SOURCE_TYPE},
     sources::google::{
         self, GoogleApiClient, GoogleCalendar, GoogleCalendarSettings, GoogleOAuthService,
         GoogleTokenProvider, DEFAULT_SYNC_INTERVAL_SECONDS as GOOGLE_SYNC_INTERVAL_SECONDS,
@@ -34,7 +36,7 @@ use glancelet_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -45,6 +47,7 @@ use uuid::Uuid;
 
 const SLACK_REDIRECT_URI: &str = "http://localhost:42813/oauth/slack/callback";
 const SLACK_CALLBACK_ADDRESS: &str = "127.0.0.1:42813";
+const WORK_CHANGED_EVENT: &str = "glancelet://work-changed";
 
 struct AppServices {
     store: Arc<SqliteWorkStore>,
@@ -52,6 +55,7 @@ struct AppServices {
     changes: SourceChangeProcessor,
     reads: WorkReadService,
     commands: WorkCommandService,
+    connections: ConnectionCommandService,
     navigation: NavigationService,
     clock: Arc<dyn Clock>,
     secrets: Arc<dyn SecretStore>,
@@ -80,6 +84,7 @@ impl AppServices {
         );
         let time_context = TimeContext::system().map_err(|error| error.to_string())?;
         let mut registry = ExtensionRegistry::new();
+        #[cfg(feature = "demo-sources")]
         registry
             .register(fake::registration())
             .map_err(|error| error.to_string())?;
@@ -128,6 +133,7 @@ impl AppServices {
             ))
             .map_err(|error| error.to_string())?;
         let registry = Arc::new(registry);
+        #[cfg(feature = "demo-sources")]
         seed_fake_sources(&store)?;
         let sync = Arc::new(SyncCoordinator::new(
             Arc::clone(&store_port),
@@ -151,6 +157,10 @@ impl AppServices {
                 time_context,
             ),
             commands: WorkCommandService::new(Arc::clone(&store_port), Arc::clone(&clock)),
+            connections: ConnectionCommandService::new(
+                Arc::clone(&store_port),
+                Arc::clone(&secrets),
+            ),
             navigation: NavigationService::new(store_port),
             clock,
             secrets,
@@ -469,10 +479,13 @@ fn disconnect_slack(
     connection_id: String,
 ) -> Result<(), String> {
     services
-        .slack_tokens
-        .delete(&connection_id)
-        .map_err(|error| error.to_string())?;
-    disable_connection_and_sources(&services, &connection_id, SLACK_PROVIDER_ID, "Slack")
+        .connections
+        .disconnect(
+            &connection_id,
+            &ProviderId(SLACK_PROVIDER_ID.into()),
+            &slack::credential_key(&connection_id),
+        )
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -750,10 +763,13 @@ fn disconnect_notion(
     connection_id: String,
 ) -> Result<(), String> {
     services
-        .notion_tokens
-        .delete(&connection_id)
-        .map_err(|error| error.to_string())?;
-    disable_connection_and_sources(&services, &connection_id, NOTION_PROVIDER_ID, "Notion")
+        .connections
+        .disconnect(
+            &connection_id,
+            &ProviderId(NOTION_PROVIDER_ID.into()),
+            &notion::credential_key(&connection_id),
+        )
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -988,10 +1004,13 @@ fn disconnect_google(
     connection_id: String,
 ) -> Result<(), String> {
     services
-        .google_tokens
-        .delete(&connection_id)
-        .map_err(|error| error.to_string())?;
-    disable_connection_and_sources(&services, &connection_id, GOOGLE_PROVIDER_ID, "Google")
+        .connections
+        .disconnect(
+            &connection_id,
+            &ProviderId(GOOGLE_PROVIDER_ID.into()),
+            &google::credential_key(&connection_id),
+        )
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1041,9 +1060,13 @@ pub fn run() {
         .setup(|app| {
             let services = AppServices::initialize(app).map_err(std::io::Error::other)?;
             let scheduler_services = Arc::clone(&services);
+            let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 while !scheduler_services.stopping.load(Ordering::Relaxed) {
-                    let _ = scheduler_services.sync_due().await;
+                    if let Err(error) = scheduler_services.sync_due().await {
+                        eprintln!("Glancelet background sync failed: {error}");
+                    }
+                    let _ = app_handle.emit(WORK_CHANGED_EVENT, ());
                     tokio::time::sleep(Duration::from_secs(30)).await;
                 }
             });
@@ -1221,42 +1244,6 @@ fn persist_google_connection(
     Ok(())
 }
 
-fn disable_connection_and_sources(
-    services: &AppServices,
-    connection_id: &str,
-    provider_id: &str,
-    provider_name: &str,
-) -> Result<(), String> {
-    let mut connection = services
-        .store
-        .connections()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .find(|connection| {
-            connection.id == connection_id && connection.provider_id.0 == provider_id
-        })
-        .ok_or_else(|| format!("{provider_name} connection was not found"))?;
-    connection.config["status"] = Value::String("disconnected".into());
-    services
-        .store
-        .put_connection(&connection)
-        .map_err(|error| error.to_string())?;
-    for mut config in services
-        .store
-        .source_configs()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter(|config| config.connection_id == connection_id)
-    {
-        config.enabled = false;
-        services
-            .store
-            .put_source_config(&config)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
 fn connection_status(connection: &Connection, authentication_required: bool) -> &'static str {
     if connection.config["status"] == "disconnected" {
         "disconnected"
@@ -1337,6 +1324,7 @@ async fn read_oauth_callback(
     ))
 }
 
+#[cfg(feature = "demo-sources")]
 fn seed_fake_sources(store: &SqliteWorkStore) -> Result<(), String> {
     if !store
         .source_configs()

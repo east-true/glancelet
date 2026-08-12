@@ -11,8 +11,8 @@ pub use secrets::*;
 use crate::{
     application::{SourceRuntime, StoredWork, WorkMutation, WorkStore},
     domain::{
-        LocalDisposition, ProgressAuthority, SourceBatch, SourceBatchKind, SourceChange,
-        SourceChangeKind, SourceEntity, SourceIdentity, SourceMutation, WorkBinding,
+        LocalDisposition, ProgressAuthority, ProviderId, SourceBatch, SourceBatchKind,
+        SourceChange, SourceChangeKind, SourceEntity, SourceIdentity, SourceMutation, WorkBinding,
         WorkBindingMode, WorkDraft, WorkEntry, WorkKind, WorkLifecycle, WorkPlanning, WorkProgress,
     },
     extension::{Connection, SourceConfig},
@@ -104,7 +104,10 @@ impl SqliteWorkStore {
                    activation_seq INTEGER NOT NULL,
                    entity_snapshot_json TEXT NOT NULL,
                    occurred_at TEXT NOT NULL,
-                   processed_at TEXT
+                   processed_at TEXT,
+                   projection_failure_count INTEGER NOT NULL DEFAULT 0,
+                   projection_last_error TEXT,
+                   projection_next_retry_at TEXT
                  );
                  CREATE INDEX IF NOT EXISTS source_changes_pending
                    ON source_changes(processed_at, id);
@@ -195,6 +198,61 @@ impl SqliteWorkStore {
                 )
                 .map_err(storage_error)?;
         }
+        let projection_failures_applied = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=3)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(storage_error)?;
+        if !projection_failures_applied {
+            let columns = {
+                let mut statement = transaction
+                    .prepare("PRAGMA table_info(source_changes)")
+                    .map_err(storage_error)?;
+                let columns = statement
+                    .query_map([], |row| row.get::<_, String>(1))
+                    .map_err(storage_error)?
+                    .collect::<std::result::Result<HashSet<_>, _>>()
+                    .map_err(storage_error)?;
+                columns
+            };
+            if !columns.contains("projection_failure_count") {
+                transaction
+                    .execute_batch(
+                        "ALTER TABLE source_changes
+                         ADD COLUMN projection_failure_count INTEGER NOT NULL DEFAULT 0;",
+                    )
+                    .map_err(storage_error)?;
+            }
+            if !columns.contains("projection_last_error") {
+                transaction
+                    .execute_batch(
+                        "ALTER TABLE source_changes ADD COLUMN projection_last_error TEXT;",
+                    )
+                    .map_err(storage_error)?;
+            }
+            if !columns.contains("projection_next_retry_at") {
+                transaction
+                    .execute_batch(
+                        "ALTER TABLE source_changes ADD COLUMN projection_next_retry_at TEXT;",
+                    )
+                    .map_err(storage_error)?;
+            }
+            transaction
+                .execute_batch(
+                    "CREATE INDEX IF NOT EXISTS source_changes_projection_due
+                     ON source_changes(processed_at, projection_next_retry_at, id);",
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version, name)
+                     VALUES (3, '003_projection_failure_retry')",
+                    [],
+                )
+                .map_err(storage_error)?;
+        }
         transaction.commit().map_err(storage_error)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -252,6 +310,53 @@ impl WorkStore for SqliteWorkStore {
             })
             .map_err(storage_error)?;
         rows.map(|row| row.map_err(storage_error)).collect()
+    }
+
+    fn disconnect_connection(&self, connection_id: &str, provider_id: &ProviderId) -> Result<()> {
+        let mut connection = self.connection.lock().expect("sqlite connection poisoned");
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let mut stored = transaction
+            .query_row(
+                "SELECT id, provider_id, display_name, config_json
+                 FROM connections WHERE id=?1",
+                [connection_id],
+                |row| {
+                    Ok(Connection {
+                        id: row.get(0)?,
+                        provider_id: ProviderId(row.get(1)?),
+                        display_name: row.get(2)?,
+                        config: parse_column(row, 3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(storage_error)?
+            .ok_or_else(|| GlanceletError::NotFound(format!("connection {connection_id}")))?;
+        if &stored.provider_id != provider_id {
+            return Err(GlanceletError::InvalidOperation(
+                "connection does not belong to the requested provider".into(),
+            ));
+        }
+        let config = stored.config.as_object_mut().ok_or_else(|| {
+            GlanceletError::Storage("connection configuration is not an object".into())
+        })?;
+        config.insert(
+            "status".into(),
+            serde_json::Value::String("disconnected".into()),
+        );
+        transaction
+            .execute(
+                "UPDATE connections SET config_json=?2 WHERE id=?1",
+                params![connection_id, json(&stored.config)?],
+            )
+            .map_err(storage_error)?;
+        transaction
+            .execute(
+                "UPDATE source_configs SET enabled=0 WHERE connection_id=?1",
+                [connection_id],
+            )
+            .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)
     }
 
     fn put_source_config(&self, config: &SourceConfig) -> Result<()> {
@@ -476,16 +581,23 @@ impl WorkStore for SqliteWorkStore {
         Ok(changes)
     }
 
-    fn pending_source_changes(&self, limit: usize) -> Result<Vec<SourceChange>> {
+    fn pending_source_changes_at(
+        &self,
+        limit: usize,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<SourceChange>> {
         let connection = self.connection.lock().expect("sqlite connection poisoned");
         let mut statement = connection
             .prepare(
                 "SELECT id, kind, entity_snapshot_json, occurred_at, processed_at
-                 FROM source_changes WHERE processed_at IS NULL ORDER BY id LIMIT ?1",
+                 FROM source_changes
+                 WHERE processed_at IS NULL
+                   AND (projection_next_retry_at IS NULL OR projection_next_retry_at<=?1)
+                 ORDER BY id LIMIT ?2",
             )
             .map_err(storage_error)?;
         let rows = statement
-            .query_map([limit as i64], |row| {
+            .query_map(params![timestamp(now), limit as i64], |row| {
                 let snapshot: String = row.get(2)?;
                 let kind: String = row.get(1)?;
                 Ok(SourceChange {
@@ -503,6 +615,32 @@ impl WorkStore for SqliteWorkStore {
             })
             .map_err(storage_error)?;
         rows.map(|row| row.map_err(storage_error)).collect()
+    }
+
+    fn record_projection_failure(
+        &self,
+        change_id: i64,
+        next_retry_at: DateTime<Utc>,
+        error: &str,
+    ) -> Result<()> {
+        let updated = self
+            .connection
+            .lock()
+            .expect("sqlite connection poisoned")
+            .execute(
+                "UPDATE source_changes
+                 SET projection_failure_count=projection_failure_count+1,
+                     projection_last_error=?2, projection_next_retry_at=?3
+                 WHERE id=?1 AND processed_at IS NULL",
+                params![change_id, error, timestamp(next_retry_at)],
+            )
+            .map_err(storage_error)?;
+        if updated == 0 {
+            return Err(GlanceletError::NotFound(format!(
+                "pending source change {change_id}"
+            )));
+        }
+        Ok(())
     }
 
     fn apply_projection(
@@ -554,7 +692,10 @@ impl WorkStore for SqliteWorkStore {
         }
         transaction
             .execute(
-                "UPDATE source_changes SET processed_at=?2 WHERE id=?1 AND processed_at IS NULL",
+                "UPDATE source_changes
+                 SET processed_at=?2, projection_last_error=NULL,
+                     projection_next_retry_at=NULL
+                 WHERE id=?1 AND processed_at IS NULL",
                 params![change.id, timestamp(now)],
             )
             .map_err(storage_error)?;

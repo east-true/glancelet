@@ -2,6 +2,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use tokio::{sync::Mutex, task::JoinSet};
 
+const PROJECTION_RETRY_DELAY_SECONDS: i64 = 300;
+
 use crate::{
     application::{Clock, WorkStore},
     extension::ExtensionRegistry,
@@ -154,18 +156,44 @@ impl SourceChangeProcessor {
     }
 
     pub fn process_pending(&self, limit: usize) -> Result<usize> {
-        let changes = self.store.pending_source_changes(limit)?;
+        let changes = self
+            .store
+            .pending_source_changes_at(limit, self.clock.now())?;
         let mut processed = 0;
+        let mut failures = Vec::new();
         for change in changes {
-            let config = self
-                .store
-                .source_config(&change.source_entity.source_config_id)?;
-            let projector = self.registry.projector(&config.source_type_id)?;
-            let draft = projector.project(&change.source_entity, &change)?;
-            self.store
-                .apply_projection(&change, &draft, projector.version(), self.clock.now())?;
-            processed += 1;
+            let result = (|| {
+                let config = self
+                    .store
+                    .source_config(&change.source_entity.source_config_id)?;
+                let projector = self.registry.projector(&config.source_type_id)?;
+                let draft = projector.project(&change.source_entity, &change)?;
+                self.store
+                    .apply_projection(&change, &draft, projector.version(), self.clock.now())
+            })();
+            match result {
+                Ok(()) => processed += 1,
+                Err(error) => {
+                    let message = error.to_string();
+                    let next_retry_at = self.clock.now()
+                        + chrono::Duration::seconds(PROJECTION_RETRY_DELAY_SECONDS);
+                    self.store.record_projection_failure(
+                        change.id,
+                        next_retry_at,
+                        &message.chars().take(1_000).collect::<String>(),
+                    )?;
+                    failures.push(format!("change {}: {message}", change.id));
+                }
+            }
         }
-        Ok(processed)
+        if failures.is_empty() {
+            Ok(processed)
+        } else {
+            Err(crate::GlanceletError::Source(format!(
+                "{} projection(s) failed: {}",
+                failures.len(),
+                failures.join("; ")
+            )))
+        }
     }
 }
