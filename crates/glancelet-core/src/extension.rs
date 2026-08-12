@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -87,14 +90,18 @@ impl ExtensionRegistry {
     }
 
     pub fn register(&mut self, provider: ProviderRegistration) -> Result<()> {
-        for source in provider.sources {
-            let id = source.descriptor.source_type_id.clone();
-            if self.sources.contains_key(&id) {
+        let mut incoming = HashSet::new();
+        for source in &provider.sources {
+            let id = &source.descriptor.source_type_id;
+            if self.sources.contains_key(id) || !incoming.insert(id.clone()) {
                 return Err(GlanceletError::InvalidOperation(format!(
                     "source type '{}' is already registered",
                     id.0
                 )));
             }
+        }
+        for source in provider.sources {
+            let id = source.descriptor.source_type_id.clone();
             self.sources.insert(
                 id,
                 RegisteredSource {

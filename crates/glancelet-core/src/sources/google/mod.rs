@@ -4,7 +4,10 @@ mod oauth;
 pub use client::*;
 pub use oauth::*;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Weak},
+};
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -71,7 +74,7 @@ pub struct GoogleTokenProvider {
     client: Arc<GoogleApiClient>,
     secrets: Arc<dyn SecretStore>,
     clock: Arc<dyn Clock>,
-    locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    locks: std::sync::Mutex<HashMap<String, Weak<Mutex<()>>>>,
 }
 
 impl GoogleTokenProvider {
@@ -105,11 +108,14 @@ impl GoogleTokenProvider {
         let key = credential_key(connection_id);
         let lock = {
             let mut locks = self.locks.lock().expect("Google token lock map poisoned");
-            Arc::clone(
-                locks
-                    .entry(key.clone())
-                    .or_insert_with(|| Arc::new(Mutex::new(()))),
-            )
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(key.clone(), Arc::downgrade(&lock));
+                lock
+            }
         };
         let _guard = lock.lock().await;
         let raw = self.secrets.get(&key)?.ok_or_else(|| {
@@ -400,14 +406,23 @@ fn projection_window(today: NaiveDate, time_context: TimeContext) -> Result<Proj
 }
 
 fn local_midnight(date: NaiveDate, time_context: TimeContext) -> Result<DateTime<Utc>> {
-    let local = date.and_hms_opt(0, 0, 0).expect("midnight is valid");
-    match time_context.timezone().from_local_datetime(&local) {
-        LocalResult::Single(value) => Ok(value.with_timezone(&Utc)),
-        LocalResult::Ambiguous(first, _) => Ok(first.with_timezone(&Utc)),
-        LocalResult::None => Err(GlanceletError::Source(
-            "local timezone has no midnight for the Calendar window".into(),
-        )),
+    let start = date.and_hms_opt(0, 0, 0).expect("midnight is valid");
+    // A small set of historical timezone transitions skipped local midnight—or
+    // an entire local date. Calendar windows still need a deterministic boundary,
+    // so advance to the first representable instant at or after the requested date.
+    for minutes in 0..=48 * 60 {
+        let local = start + chrono::Duration::minutes(minutes);
+        match time_context.timezone().from_local_datetime(&local) {
+            LocalResult::Single(value) => return Ok(value.with_timezone(&Utc)),
+            LocalResult::Ambiguous(first, second) => {
+                return Ok(first.min(second).with_timezone(&Utc));
+            }
+            LocalResult::None => {}
+        }
     }
+    Err(GlanceletError::Source(
+        "local timezone has no valid Calendar window boundary".into(),
+    ))
 }
 
 fn map_active_event(
@@ -604,4 +619,27 @@ fn malformed_event(field: &str) -> GlanceletError {
     GlanceletError::Source(format!(
         "Google Calendar returned an event with invalid {field}"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{NaiveDate, TimeZone, Utc};
+
+    use super::local_midnight;
+    use crate::application::TimeContext;
+
+    #[test]
+    fn missing_local_date_advances_to_the_first_valid_instant() {
+        let boundary = local_midnight(
+            NaiveDate::from_ymd_opt(2011, 12, 30).unwrap(),
+            TimeContext::named("Pacific/Apia").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            boundary,
+            Utc.with_ymd_and_hms(2011, 12, 30, 10, 0, 0)
+                .single()
+                .unwrap()
+        );
+    }
 }

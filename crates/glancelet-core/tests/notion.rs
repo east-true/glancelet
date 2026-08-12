@@ -412,6 +412,35 @@ async fn discovery_schema_and_property_ids_survive_renames() {
 }
 
 #[tokio::test]
+async fn preview_bounds_query_to_the_requested_rows() {
+    let pages = (0..10)
+        .map(|index| {
+            task_page(
+                &format!("preview-{index}"),
+                "Task",
+                &format!("Preview {index}"),
+                "todo-option",
+                "Open",
+                Value::Null,
+            )
+        })
+        .collect();
+    let server = MockNotion::start(vec![
+        schema("Task"),
+        query(pages, true, Some("unused-next-cursor")),
+    ])
+    .await;
+    let rows = notion::preview(&server.client(), "secret", &settings(), 10)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 10);
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].contains("\"page_size\":10"));
+    assert!(!requests[1].contains("start_cursor"));
+}
+
+#[tokio::test]
 async fn query_filters_all_pages_maps_temporal_values_and_external_actions() {
     let first = task_page(
         "page-1",

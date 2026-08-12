@@ -9,7 +9,7 @@ mod secrets;
 pub use secrets::*;
 
 use crate::{
-    application::{SourceRuntime, StoredWork, WorkMutation, WorkStore},
+    application::{SourceFailureKind, SourceRuntime, StoredWork, WorkMutation, WorkStore},
     domain::{
         LocalDisposition, ProgressAuthority, ProviderId, SourceBatch, SourceBatchKind,
         SourceChange, SourceChangeKind, SourceEntity, SourceIdentity, SourceMutation, WorkBinding,
@@ -79,7 +79,9 @@ impl SqliteWorkStore {
                    last_success_at TEXT,
                    next_sync_at TEXT,
                    failure_count INTEGER NOT NULL DEFAULT 0,
-                   last_error TEXT
+                   last_error TEXT,
+                   config_revision INTEGER NOT NULL DEFAULT 1,
+                   failure_kind TEXT
                  );
                  CREATE TABLE IF NOT EXISTS source_entities (
                    id TEXT PRIMARY KEY,
@@ -253,6 +255,64 @@ impl SqliteWorkStore {
                 )
                 .map_err(storage_error)?;
         }
+        let consistency_applied = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=4)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(storage_error)?;
+        if !consistency_applied {
+            let runtime_columns = {
+                let mut statement = transaction
+                    .prepare("PRAGMA table_info(source_runtime)")
+                    .map_err(storage_error)?;
+                let columns = statement
+                    .query_map([], |row| row.get::<_, String>(1))
+                    .map_err(storage_error)?
+                    .collect::<std::result::Result<HashSet<_>, _>>()
+                    .map_err(storage_error)?;
+                columns
+            };
+            if !runtime_columns.contains("config_revision") {
+                transaction
+                    .execute_batch(
+                        "ALTER TABLE source_runtime
+                         ADD COLUMN config_revision INTEGER NOT NULL DEFAULT 1;",
+                    )
+                    .map_err(storage_error)?;
+            }
+            if !runtime_columns.contains("failure_kind") {
+                transaction
+                    .execute_batch("ALTER TABLE source_runtime ADD COLUMN failure_kind TEXT;")
+                    .map_err(storage_error)?;
+            }
+            transaction
+                .execute_batch(
+                    r#"UPDATE source_runtime
+                     SET failure_kind=CASE
+                       WHEN last_error LIKE 'authentication is required:%'
+                         THEN '"authentication_required"'
+                       WHEN last_error LIKE '%rate limited%'
+                         THEN '"rate_limited"'
+                       WHEN last_error IS NOT NULL THEN '"other"'
+                       ELSE NULL
+                     END
+                     WHERE failure_kind IS NULL;
+                     CREATE INDEX IF NOT EXISTS source_changes_entity_pending
+                       ON source_changes(source_entity_id, processed_at, id);
+                     CREATE INDEX IF NOT EXISTS work_entries_dashboard
+                       ON work_entries(lifecycle, disposition, snoozed_until);"#,
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version, name)
+                     VALUES (4, '004_core_consistency')",
+                    [],
+                )
+                .map_err(storage_error)?;
+        }
         transaction.commit().map_err(storage_error)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -274,22 +334,40 @@ impl SqliteWorkStore {
 
 impl WorkStore for SqliteWorkStore {
     fn put_connection(&self, connection: &Connection) -> Result<()> {
-        self.connection
-            .lock()
-            .expect("sqlite connection poisoned")
+        let mut database = self.connection.lock().expect("sqlite connection poisoned");
+        let transaction = database.transaction().map_err(storage_error)?;
+        put_connection_tx(&transaction, connection)?;
+        transaction
             .execute(
-                "INSERT INTO connections (id, provider_id, display_name, config_json)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(id) DO UPDATE SET provider_id=?2, display_name=?3, config_json=?4",
-                params![
-                    connection.id,
-                    connection.provider_id.0,
-                    connection.display_name,
-                    json(&connection.config)?
-                ],
+                "UPDATE source_runtime
+                 SET config_revision=config_revision+1
+                 WHERE source_config_id IN (
+                   SELECT id FROM source_configs WHERE connection_id=?1
+                 )",
+                [&connection.id],
             )
             .map_err(storage_error)?;
-        Ok(())
+        transaction.commit().map_err(storage_error)
+    }
+
+    fn connect_connection(
+        &self,
+        connection: &Connection,
+        source_configs: &[SourceConfig],
+    ) -> Result<()> {
+        let mut database = self.connection.lock().expect("sqlite connection poisoned");
+        let transaction = database.transaction().map_err(storage_error)?;
+        put_connection_tx(&transaction, connection)?;
+        for config in source_configs {
+            if config.connection_id != connection.id {
+                return Err(GlanceletError::InvalidOperation(
+                    "connected source does not belong to the connection".into(),
+                ));
+            }
+            put_source_config_tx(&transaction, config)?;
+        }
+        resume_connection_tx(&transaction, &connection.id)?;
+        transaction.commit().map_err(storage_error)
     }
 
     fn connections(&self) -> Result<Vec<Connection>> {
@@ -356,62 +434,45 @@ impl WorkStore for SqliteWorkStore {
                 [connection_id],
             )
             .map_err(storage_error)?;
+        transaction
+            .execute(
+                "UPDATE source_runtime
+                 SET config_revision=config_revision+1
+                 WHERE source_config_id IN (
+                   SELECT id FROM source_configs WHERE connection_id=?1
+                 )",
+                [connection_id],
+            )
+            .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)
+    }
+
+    fn resume_connection(&self, connection_id: &str) -> Result<()> {
+        let mut database = self.connection.lock().expect("sqlite connection poisoned");
+        let transaction = database.transaction().map_err(storage_error)?;
+        resume_connection_tx(&transaction, connection_id)?;
         transaction.commit().map_err(storage_error)
     }
 
     fn put_source_config(&self, config: &SourceConfig) -> Result<()> {
-        let mut connection = self.connection.lock().expect("sqlite connection poisoned");
-        let transaction = connection.transaction().map_err(storage_error)?;
-        let restoring = transaction
-            .query_row(
-                "SELECT removed_at IS NOT NULL FROM source_configs WHERE id=?1",
-                [&config.id],
-                |row| row.get::<_, bool>(0),
-            )
-            .optional()
-            .map_err(storage_error)?
-            .unwrap_or(false)
-            && config.removed_at.is_none();
-        transaction
-            .execute(
-                "INSERT INTO source_configs
-                   (id, connection_id, source_type_id, display_name, enabled,
-                    expected_sync_interval_seconds, settings_json, removed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(id) DO UPDATE SET connection_id=?2, source_type_id=?3,
-                   display_name=?4, enabled=?5, expected_sync_interval_seconds=?6,
-                   settings_json=?7, removed_at=?8",
-                params![
-                    config.id,
-                    config.connection_id,
-                    config.source_type_id.0,
-                    config.display_name,
-                    config.enabled,
-                    config.expected_sync_interval_seconds,
-                    json(&config.settings)?,
-                    config.removed_at.map(timestamp)
-                ],
-            )
-            .map_err(storage_error)?;
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO source_runtime (source_config_id) VALUES (?1)",
-                [&config.id],
-            )
-            .map_err(storage_error)?;
-        if restoring {
-            // A removed source can miss an arbitrary amount of provider state. Its
-            // first restored sync must reconcile authoritatively instead of using
-            // a stale provider checkpoint (notably a Google syncToken).
-            transaction
-                .execute(
-                    "UPDATE source_runtime
-                     SET checkpoint_json=NULL, next_sync_at=NULL,
-                         failure_count=0, last_error=NULL
-                     WHERE source_config_id=?1",
-                    [&config.id],
-                )
-                .map_err(storage_error)?;
+        let mut database = self.connection.lock().expect("sqlite connection poisoned");
+        let transaction = database.transaction().map_err(storage_error)?;
+        put_source_config_tx(&transaction, config)?;
+        transaction.commit().map_err(storage_error)
+    }
+
+    fn put_source_configs(&self, configs: &[SourceConfig]) -> Result<()> {
+        let mut database = self.connection.lock().expect("sqlite connection poisoned");
+        let transaction = database.transaction().map_err(storage_error)?;
+        let mut ids = HashSet::new();
+        for config in configs {
+            if !ids.insert(config.id.as_str()) {
+                return Err(GlanceletError::InvalidOperation(format!(
+                    "source config '{}' was supplied more than once",
+                    config.id
+                )));
+            }
+            put_source_config_tx(&transaction, config)?;
         }
         transaction.commit().map_err(storage_error)
     }
@@ -453,7 +514,7 @@ impl WorkStore for SqliteWorkStore {
             .expect("sqlite connection poisoned")
             .query_row(
                 "SELECT checkpoint_json, last_attempt_at, last_success_at, next_sync_at,
-                        failure_count, last_error
+                        failure_count, last_error, config_revision, failure_kind
                  FROM source_runtime WHERE source_config_id=?1",
                 [id],
                 runtime_from_row,
@@ -463,64 +524,129 @@ impl WorkStore for SqliteWorkStore {
             .ok_or_else(|| GlanceletError::NotFound(format!("source runtime {id}")))
     }
 
-    fn record_sync_attempt(&self, id: &str, now: DateTime<Utc>) -> Result<()> {
+    fn source_sync_state(&self, id: &str) -> Result<(SourceConfig, SourceRuntime)> {
         self.connection
             .lock()
             .expect("sqlite connection poisoned")
+            .query_row(
+                "SELECT sc.id, sc.connection_id, sc.source_type_id, sc.display_name,
+                        sc.enabled, sc.expected_sync_interval_seconds, sc.settings_json,
+                        sc.removed_at, sr.checkpoint_json, sr.last_attempt_at,
+                        sr.last_success_at, sr.next_sync_at, sr.failure_count,
+                        sr.last_error, sr.config_revision, sr.failure_kind
+                 FROM source_configs sc
+                 JOIN source_runtime sr ON sr.source_config_id=sc.id
+                 WHERE sc.id=?1",
+                [id],
+                source_sync_state_from_row,
+            )
+            .optional()
+            .map_err(storage_error)?
+            .ok_or_else(|| GlanceletError::NotFound(format!("source config {id}")))
+    }
+
+    fn record_sync_attempt(
+        &self,
+        id: &str,
+        expected_config_revision: i64,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let updated = self
+            .connection
+            .lock()
+            .expect("sqlite connection poisoned")
             .execute(
-                "UPDATE source_runtime SET last_attempt_at=?2 WHERE source_config_id=?1",
-                params![id, timestamp(now)],
+                "UPDATE source_runtime SET last_attempt_at=?3
+                 WHERE source_config_id=?1 AND config_revision=?2",
+                params![id, expected_config_revision, timestamp(now)],
             )
             .map_err(storage_error)?;
-        Ok(())
+        ensure_current_sync(updated)
     }
 
     fn record_sync_failure(
         &self,
         id: &str,
+        expected_config_revision: i64,
         now: DateTime<Utc>,
         next_retry_at: Option<DateTime<Utc>>,
+        kind: SourceFailureKind,
         error: &str,
     ) -> Result<()> {
-        self.connection
+        let updated = self
+            .connection
             .lock()
             .expect("sqlite connection poisoned")
             .execute(
                 "UPDATE source_runtime
-                 SET last_attempt_at=?2, next_sync_at=?3,
-                     failure_count=failure_count+1, last_error=?4
-                 WHERE source_config_id=?1",
-                params![id, timestamp(now), next_retry_at.map(timestamp), error],
+                 SET last_attempt_at=?3, next_sync_at=?4,
+                     failure_count=failure_count+1, last_error=?5, failure_kind=?6
+                 WHERE source_config_id=?1 AND config_revision=?2",
+                params![
+                    id,
+                    expected_config_revision,
+                    timestamp(now),
+                    next_retry_at.map(timestamp),
+                    error,
+                    json(&kind)?
+                ],
             )
             .map_err(storage_error)?;
-        Ok(())
+        ensure_current_sync(updated)
     }
 
     fn clear_sync_failure(&self, id: &str) -> Result<()> {
-        self.connection
+        let updated = self
+            .connection
             .lock()
             .expect("sqlite connection poisoned")
             .execute(
                 "UPDATE source_runtime
-                 SET next_sync_at=NULL, failure_count=0, last_error=NULL
+                 SET next_sync_at=NULL, failure_count=0, last_error=NULL,
+                     failure_kind=NULL, config_revision=config_revision+1
                  WHERE source_config_id=?1",
                 [id],
             )
             .map_err(storage_error)?;
+        if updated == 0 {
+            return Err(GlanceletError::NotFound(format!("source runtime {id}")));
+        }
         Ok(())
     }
 
     fn apply_source_batch(
         &self,
         config: &SourceConfig,
+        expected_config_revision: i64,
         batch: &SourceBatch,
         now: DateTime<Utc>,
     ) -> Result<usize> {
-        let mut connection = self.connection.lock().expect("sqlite connection poisoned");
-        let transaction = connection.transaction().map_err(storage_error)?;
+        let mut database = self.connection.lock().expect("sqlite connection poisoned");
+        let transaction = database.transaction().map_err(storage_error)?;
+        let current = transaction
+            .query_row(
+                "SELECT sc.enabled, sc.removed_at, sr.config_revision
+                 FROM source_configs sc
+                 JOIN source_runtime sr ON sr.source_config_id=sc.id
+                 WHERE sc.id=?1",
+                [&config.id],
+                |row| {
+                    Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(storage_error)?
+            .ok_or_else(|| GlanceletError::NotFound(format!("source config {}", config.id)))?;
+        if !current.0 || current.1.is_some() || current.2 != expected_config_revision {
+            return Err(stale_sync_error());
+        }
+
         let mut changes = 0;
         let mut snapshot_identities = HashSet::new();
-
         for mutation in &batch.mutations {
             match mutation {
                 SourceMutation::Upsert(record) => {
@@ -564,19 +690,21 @@ impl WorkStore for SqliteWorkStore {
         }
 
         let next_sync = now + chrono::Duration::seconds(config.expected_sync_interval_seconds);
-        transaction
+        let updated = transaction
             .execute(
-                "UPDATE source_runtime SET checkpoint_json=?2, last_success_at=?3,
-                   next_sync_at=?4, failure_count=0, last_error=NULL
-                 WHERE source_config_id=?1",
+                "UPDATE source_runtime SET checkpoint_json=?3, last_success_at=?4,
+                   next_sync_at=?5, failure_count=0, last_error=NULL, failure_kind=NULL
+                 WHERE source_config_id=?1 AND config_revision=?2",
                 params![
                     config.id,
+                    expected_config_revision,
                     optional_json(batch.next_checkpoint.as_ref())?,
                     timestamp(now),
                     timestamp(next_sync)
                 ],
             )
             .map_err(storage_error)?;
+        ensure_current_sync(updated)?;
         transaction.commit().map_err(storage_error)?;
         Ok(changes)
     }
@@ -593,6 +721,12 @@ impl WorkStore for SqliteWorkStore {
                  FROM source_changes
                  WHERE processed_at IS NULL
                    AND (projection_next_retry_at IS NULL OR projection_next_retry_at<=?1)
+                   AND NOT EXISTS (
+                     SELECT 1 FROM source_changes AS earlier
+                     WHERE earlier.source_entity_id=source_changes.source_entity_id
+                       AND earlier.processed_at IS NULL
+                       AND earlier.id<source_changes.id
+                   )
                  ORDER BY id LIMIT ?2",
             )
             .map_err(storage_error)?;
@@ -641,6 +775,52 @@ impl WorkStore for SqliteWorkStore {
             )));
         }
         Ok(())
+    }
+
+    fn enqueue_reprojections(
+        &self,
+        source_config_id: &str,
+        projector_version: i32,
+        now: DateTime<Utc>,
+    ) -> Result<usize> {
+        let mut database = self.connection.lock().expect("sqlite connection poisoned");
+        let transaction = database.transaction().map_err(storage_error)?;
+        let entities = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT se.id, se.source_config_id, se.entity_type, se.external_id,
+                            se.title, se.revision, se.active, se.activation_seq,
+                            se.display_json, se.metadata_json, se.navigation_json,
+                            se.created_at, se.updated_at
+                     FROM source_entities se
+                     JOIN work_bindings wb ON wb.id=(
+                       SELECT latest.id FROM work_bindings latest
+                       WHERE latest.source_entity_id=se.id
+                       ORDER BY latest.source_activation_seq DESC, latest.id DESC LIMIT 1
+                     )
+                     WHERE se.source_config_id=?1 AND se.active=1
+                       AND wb.projector_version<?2
+                       AND NOT EXISTS (
+                         SELECT 1 FROM source_changes pending
+                         WHERE pending.source_entity_id=se.id AND pending.processed_at IS NULL
+                       )",
+                )
+                .map_err(storage_error)?;
+            let entities = statement
+                .query_map(
+                    params![source_config_id, projector_version],
+                    source_entity_from_row,
+                )
+                .map_err(storage_error)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(storage_error)?;
+            entities
+        };
+        for entity in &entities {
+            insert_change(&transaction, entity, SourceChangeKind::Updated, now)?;
+        }
+        transaction.commit().map_err(storage_error)?;
+        Ok(entities.len())
     }
 
     fn apply_projection(
@@ -715,6 +895,34 @@ impl WorkStore for SqliteWorkStore {
         rows.map(|row| row.map_err(storage_error)).collect()
     }
 
+    fn dashboard_work(&self, now: DateTime<Utc>) -> Result<Vec<StoredWork>> {
+        let connection = self.connection.lock().expect("sqlite connection poisoned");
+        let mut statement = connection
+            .prepare(&stored_work_query(
+                "WHERE work_entries.lifecycle=?1
+                   AND work_entries.disposition!=?2
+                   AND (
+                     work_entries.disposition!=?3
+                     OR (work_entries.snoozed_until IS NOT NULL
+                         AND work_entries.snoozed_until<=?4)
+                   )
+                 ORDER BY work_entries.created_at, work_entries.id",
+            ))
+            .map_err(storage_error)?;
+        let rows = statement
+            .query_map(
+                params![
+                    json(&WorkLifecycle::Active)?,
+                    json(&LocalDisposition::Dismissed)?,
+                    json(&LocalDisposition::Snoozed)?,
+                    timestamp(now)
+                ],
+                stored_work_from_row,
+            )
+            .map_err(storage_error)?;
+        rows.map(|row| row.map_err(storage_error)).collect()
+    }
+
     fn stored_work_by_id(&self, id: &str) -> Result<StoredWork> {
         self.connection
             .lock()
@@ -754,19 +962,6 @@ impl WorkStore for SqliteWorkStore {
                 "UPDATE work_entries SET pinned=?2, updated_at=?3 WHERE id=?1",
                 params![id, pinned, timestamp(now)],
             ),
-            WorkMutation::SetProgress(progress) => connection.execute(
-                "UPDATE work_entries SET progress=?2, lifecycle=?3, updated_at=?4 WHERE id=?1",
-                params![
-                    id,
-                    json(&progress)?,
-                    json(&if progress == WorkProgress::Done {
-                        WorkLifecycle::Resolved
-                    } else {
-                        WorkLifecycle::Active
-                    })?,
-                    timestamp(now)
-                ],
-            ),
         }
         .map_err(storage_error)?;
         if updated == 0 {
@@ -774,6 +969,237 @@ impl WorkStore for SqliteWorkStore {
         }
         Ok(())
     }
+
+    fn transition_local_progress(
+        &self,
+        id: &str,
+        allowed_from: &[WorkProgress],
+        to: WorkProgress,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let connection = self.connection.lock().expect("sqlite connection poisoned");
+        let next_progress = json(&to)?;
+        let next_lifecycle = json(&if to == WorkProgress::Done {
+            WorkLifecycle::Resolved
+        } else {
+            WorkLifecycle::Active
+        })?;
+        let active = json(&WorkLifecycle::Active)?;
+        let local = json(&ProgressAuthority::Local)?;
+        let allowed = allowed_from.iter().map(json).collect::<Result<Vec<_>>>()?;
+        let updated = match allowed.as_slice() {
+            [one] => connection.execute(
+                "UPDATE work_entries
+                 SET progress=?2, lifecycle=?3, updated_at=?4
+                 WHERE id=?1 AND lifecycle=?5 AND progress=?6
+                   AND EXISTS (
+                     SELECT 1 FROM work_bindings
+                     WHERE work_entry_id=?1 AND progress_authority=?7
+                   )",
+                params![
+                    id,
+                    next_progress,
+                    next_lifecycle,
+                    timestamp(now),
+                    active,
+                    one,
+                    local
+                ],
+            ),
+            [one, two] => connection.execute(
+                "UPDATE work_entries
+                 SET progress=?2, lifecycle=?3, updated_at=?4
+                 WHERE id=?1 AND lifecycle=?5 AND progress IN (?6, ?7)
+                   AND EXISTS (
+                     SELECT 1 FROM work_bindings
+                     WHERE work_entry_id=?1 AND progress_authority=?8
+                   )",
+                params![
+                    id,
+                    next_progress,
+                    next_lifecycle,
+                    timestamp(now),
+                    active,
+                    one,
+                    two,
+                    local
+                ],
+            ),
+            _ => {
+                return Err(GlanceletError::InvalidOperation(
+                    "unsupported local progress transition".into(),
+                ))
+            }
+        }
+        .map_err(storage_error)?;
+        if updated == 1 {
+            return Ok(());
+        }
+        let local_authority = connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM work_bindings
+                   WHERE work_entry_id=?1 AND progress_authority=?2
+                 ) FROM work_entries WHERE id=?1",
+                params![id, json(&ProgressAuthority::Local)?],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        match local_authority {
+            None => Err(GlanceletError::NotFound(format!("work entry {id}"))),
+            Some(false) => Err(GlanceletError::InvalidOperation(
+                "progress is not locally controlled".into(),
+            )),
+            Some(true) => Err(GlanceletError::InvalidOperation(
+                "work progress transition is stale or invalid".into(),
+            )),
+        }
+    }
+}
+
+fn put_connection_tx(transaction: &Transaction<'_>, connection: &Connection) -> Result<()> {
+    transaction
+        .execute(
+            "INSERT INTO connections (id, provider_id, display_name, config_json)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET provider_id=?2, display_name=?3, config_json=?4",
+            params![
+                connection.id,
+                connection.provider_id.0,
+                connection.display_name,
+                json(&connection.config)?
+            ],
+        )
+        .map_err(storage_error)?;
+    Ok(())
+}
+
+fn put_source_config_tx(transaction: &Transaction<'_>, config: &SourceConfig) -> Result<()> {
+    let existing = transaction
+        .query_row(
+            "SELECT connection_id, source_type_id, settings_json, removed_at
+             FROM source_configs WHERE id=?1",
+            [&config.id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(storage_error)?;
+    let settings_json = json(&config.settings)?;
+    let restoring = existing
+        .as_ref()
+        .is_some_and(|(_, _, _, removed_at)| removed_at.is_some())
+        && config.removed_at.is_none();
+    let checkpoint_incompatible =
+        existing
+            .as_ref()
+            .is_some_and(|(connection_id, source_type_id, stored_settings, _)| {
+                connection_id != &config.connection_id
+                    || source_type_id != &config.source_type_id.0
+                    || stored_settings != &settings_json
+            });
+    transaction
+        .execute(
+            "INSERT INTO source_configs
+               (id, connection_id, source_type_id, display_name, enabled,
+                expected_sync_interval_seconds, settings_json, removed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET connection_id=?2, source_type_id=?3,
+               display_name=?4, enabled=?5, expected_sync_interval_seconds=?6,
+               settings_json=?7, removed_at=?8",
+            params![
+                config.id,
+                config.connection_id,
+                config.source_type_id.0,
+                config.display_name,
+                config.enabled,
+                config.expected_sync_interval_seconds,
+                settings_json,
+                config.removed_at.map(timestamp)
+            ],
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO source_runtime (source_config_id) VALUES (?1)",
+            [&config.id],
+        )
+        .map_err(storage_error)?;
+    if existing.is_some() {
+        transaction
+            .execute(
+                "UPDATE source_runtime SET config_revision=config_revision+1
+                 WHERE source_config_id=?1",
+                [&config.id],
+            )
+            .map_err(storage_error)?;
+    }
+    if restoring || checkpoint_incompatible {
+        transaction
+            .execute(
+                "UPDATE source_runtime
+                 SET checkpoint_json=NULL, next_sync_at=NULL,
+                     failure_count=0, last_error=NULL, failure_kind=NULL
+                 WHERE source_config_id=?1",
+                [&config.id],
+            )
+            .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+fn resume_connection_tx(transaction: &Transaction<'_>, connection_id: &str) -> Result<()> {
+    let exists = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM connections WHERE id=?1)",
+            [connection_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(storage_error)?;
+    if !exists {
+        return Err(GlanceletError::NotFound(format!(
+            "connection {connection_id}"
+        )));
+    }
+    transaction
+        .execute(
+            "UPDATE source_runtime
+             SET config_revision=config_revision+1,
+                 next_sync_at=CASE WHEN failure_kind=?2 THEN NULL ELSE next_sync_at END,
+                 failure_count=CASE WHEN failure_kind=?2 THEN 0 ELSE failure_count END,
+                 last_error=CASE WHEN failure_kind=?2 THEN NULL ELSE last_error END,
+                 failure_kind=CASE WHEN failure_kind=?2 THEN NULL ELSE failure_kind END
+             WHERE source_config_id IN (
+               SELECT id FROM source_configs WHERE connection_id=?1
+             )",
+            params![
+                connection_id,
+                json(&SourceFailureKind::AuthenticationRequired)?
+            ],
+        )
+        .map_err(storage_error)?;
+    Ok(())
+}
+
+fn ensure_current_sync(updated: usize) -> Result<()> {
+    if updated == 1 {
+        Ok(())
+    } else {
+        Err(stale_sync_error())
+    }
+}
+
+fn stale_sync_error() -> GlanceletError {
+    GlanceletError::InvalidOperation(
+        "source configuration changed while synchronization was running".into(),
+    )
 }
 
 fn upsert_source(
@@ -1002,7 +1428,7 @@ fn apply_mirror_projection(
         }
         (SourceChangeKind::Deactivated, None) => {}
         (SourceChangeKind::Reactivated, Some(binding)) => {
-            update_projected_fields(transaction, &binding, draft, now)?;
+            update_projected_fields(transaction, &binding, draft, projector_version, now)?;
             let planning = if draft.kind == WorkKind::Action {
                 Some(json(&WorkPlanning::Inbox)?)
             } else {
@@ -1035,7 +1461,9 @@ fn apply_mirror_projection(
                 )
                 .map_err(storage_error)?;
         }
-        (_, Some(binding)) => update_projected_fields(transaction, &binding, draft, now)?,
+        (_, Some(binding)) => {
+            update_projected_fields(transaction, &binding, draft, projector_version, now)?
+        }
         (_, None) => insert_work_and_binding(transaction, change, draft, projector_version, now)?,
     }
     Ok(())
@@ -1060,7 +1488,7 @@ fn apply_capture_projection(
         }
         SourceChangeKind::Updated => {
             if let Some(binding) = existing {
-                update_projected_fields(transaction, &binding, draft, now)?;
+                update_projected_fields(transaction, &binding, draft, projector_version, now)?;
             }
         }
         SourceChangeKind::Deactivated => {
@@ -1133,6 +1561,7 @@ fn update_projected_fields(
     transaction: &Transaction<'_>,
     binding: &WorkBinding,
     draft: &WorkDraft,
+    projector_version: i32,
     now: DateTime<Utc>,
 ) -> Result<()> {
     let progress = if draft.progress_authority == ProgressAuthority::Local {
@@ -1167,6 +1596,20 @@ fn update_projected_fields(
             ],
         )
         .map_err(storage_error)?;
+    transaction
+        .execute(
+            "UPDATE work_bindings
+             SET mode=?2, progress_authority=?3, projector_version=?4
+             WHERE source_entity_id=?1 AND work_entry_id=?5",
+            params![
+                binding.source_entity_id,
+                json(&draft.binding_mode)?,
+                json(&draft.progress_authority)?,
+                projector_version,
+                binding.work_entry_id
+            ],
+        )
+        .map_err(storage_error)?;
     Ok(())
 }
 
@@ -1190,6 +1633,7 @@ fn stored_work_query(suffix: &str) -> String {
            source_runtime.checkpoint_json, source_runtime.last_attempt_at,
            source_runtime.last_success_at, source_runtime.next_sync_at,
            source_runtime.failure_count, source_runtime.last_error,
+           source_runtime.config_revision, source_runtime.failure_kind,
            source_entities.display_json, source_entities.navigation_json,
            source_configs.removed_at
          FROM work_entries
@@ -1240,7 +1684,7 @@ fn stored_work_from_row(row: &Row<'_>) -> rusqlite::Result<StoredWork> {
             enabled: row.get(28)?,
             expected_sync_interval_seconds: row.get(29)?,
             settings: parse_column(row, 30)?,
-            removed_at: parse_optional_timestamp_column(row, 43)?,
+            removed_at: parse_optional_timestamp_column(row, 45)?,
         },
         connection: Connection {
             id: row.get(31)?,
@@ -1255,9 +1699,11 @@ fn stored_work_from_row(row: &Row<'_>) -> rusqlite::Result<StoredWork> {
             next_sync_at: parse_optional_timestamp_column(row, 38)?,
             failure_count: row.get(39)?,
             last_error: row.get(40)?,
+            config_revision: row.get(41)?,
+            failure_kind: parse_optional_column(row, 42)?,
         },
-        source_display: parse_column(row, 41)?,
-        navigation: parse_column(row, 42)?,
+        source_display: parse_column(row, 43)?,
+        navigation: parse_column(row, 44)?,
         entry,
     })
 }
@@ -1283,7 +1729,34 @@ fn runtime_from_row(row: &Row<'_>) -> rusqlite::Result<SourceRuntime> {
         next_sync_at: parse_optional_timestamp_column(row, 3)?,
         failure_count: row.get(4)?,
         last_error: row.get(5)?,
+        config_revision: row.get(6)?,
+        failure_kind: parse_optional_column(row, 7)?,
     })
+}
+
+fn source_sync_state_from_row(row: &Row<'_>) -> rusqlite::Result<(SourceConfig, SourceRuntime)> {
+    Ok((
+        SourceConfig {
+            id: row.get(0)?,
+            connection_id: row.get(1)?,
+            source_type_id: crate::domain::SourceTypeId(row.get(2)?),
+            display_name: row.get(3)?,
+            enabled: row.get(4)?,
+            expected_sync_interval_seconds: row.get(5)?,
+            settings: parse_column(row, 6)?,
+            removed_at: parse_optional_timestamp_column(row, 7)?,
+        },
+        SourceRuntime {
+            checkpoint: parse_optional_column(row, 8)?,
+            last_attempt_at: parse_optional_timestamp_column(row, 9)?,
+            last_success_at: parse_optional_timestamp_column(row, 10)?,
+            next_sync_at: parse_optional_timestamp_column(row, 11)?,
+            failure_count: row.get(12)?,
+            last_error: row.get(13)?,
+            config_revision: row.get(14)?,
+            failure_kind: parse_optional_column(row, 15)?,
+        },
+    ))
 }
 
 fn source_entity_from_row(row: &Row<'_>) -> rusqlite::Result<SourceEntity> {

@@ -182,10 +182,11 @@ pub async fn preview(
         .retrieve_data_source(token, &settings.data_source_id)
         .await?;
     validate_settings(&schema, settings)?;
-    let pages = client.query_pages(token, settings, &schema).await?;
+    let pages = client
+        .preview_pages(token, settings, &schema, limit)
+        .await?;
     pages
         .iter()
-        .take(limit)
         .map(|page| preview_row(page, settings))
         .collect()
 }
