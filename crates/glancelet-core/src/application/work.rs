@@ -106,7 +106,7 @@ impl WorkReadService {
         let mut today_items = Vec::new();
         let mut inbox_items = Vec::new();
 
-        for stored in self.store.stored_work()? {
+        for stored in self.store.dashboard_work(now)? {
             if !is_visible(&stored, now) {
                 continue;
             }
@@ -259,30 +259,21 @@ impl WorkCommandService {
     }
 
     pub fn start_work(&self, id: &str) -> Result<()> {
-        let work = self.require_local_progress(id)?;
-        if work.entry.lifecycle != WorkLifecycle::Active
-            || work.entry.progress != Some(WorkProgress::Todo)
-        {
-            return Err(GlanceletError::InvalidOperation(
-                "work can only be started from active todo progress".into(),
-            ));
-        }
-        self.apply(id, WorkMutation::SetProgress(WorkProgress::Doing))
+        self.store.transition_local_progress(
+            id,
+            &[WorkProgress::Todo],
+            WorkProgress::Doing,
+            self.clock.now(),
+        )
     }
 
     pub fn complete(&self, id: &str) -> Result<()> {
-        let work = self.require_local_progress(id)?;
-        if work.entry.lifecycle != WorkLifecycle::Active
-            || !matches!(
-                work.entry.progress,
-                Some(WorkProgress::Todo) | Some(WorkProgress::Doing)
-            )
-        {
-            return Err(GlanceletError::InvalidOperation(
-                "work can only be completed from active todo or doing progress".into(),
-            ));
-        }
-        self.apply(id, WorkMutation::SetProgress(WorkProgress::Done))
+        self.store.transition_local_progress(
+            id,
+            &[WorkProgress::Todo, WorkProgress::Doing],
+            WorkProgress::Done,
+            self.clock.now(),
+        )
     }
 
     fn require_action(&self, id: &str) -> Result<()> {
@@ -292,16 +283,6 @@ impl WorkCommandService {
             ));
         }
         Ok(())
-    }
-
-    fn require_local_progress(&self, id: &str) -> Result<StoredWork> {
-        let work = self.store.stored_work_by_id(id)?;
-        if work.binding.progress_authority != ProgressAuthority::Local {
-            return Err(GlanceletError::InvalidOperation(
-                "progress is not locally controlled".into(),
-            ));
-        }
-        Ok(work)
     }
 
     fn apply(&self, id: &str, mutation: WorkMutation) -> Result<()> {

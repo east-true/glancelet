@@ -71,6 +71,26 @@ struct AppServices {
     stopping: Arc<AtomicBool>,
 }
 
+#[derive(Debug, Default)]
+struct SyncOutcome {
+    changed: bool,
+    failures: Vec<String>,
+}
+
+impl SyncOutcome {
+    fn into_result(self) -> Result<(), String> {
+        if self.failures.is_empty() {
+            Ok(())
+        } else {
+            Err(self.failures.join("; "))
+        }
+    }
+
+    fn failure_message(&self) -> Option<String> {
+        (!self.failures.is_empty()).then(|| self.failures.join("; "))
+    }
+}
+
 impl AppServices {
     fn initialize(app: &tauri::App) -> Result<Arc<Self>, String> {
         let app_data = app
@@ -178,14 +198,14 @@ impl AppServices {
     }
 
     async fn sync_all(&self) -> Result<(), String> {
-        self.sync_selected(false).await
+        self.sync_selected(false).await?.into_result()
     }
 
-    async fn sync_due(&self) -> Result<(), String> {
+    async fn sync_due(&self) -> Result<SyncOutcome, String> {
         self.sync_selected(true).await
     }
 
-    async fn sync_selected(&self, only_due: bool) -> Result<(), String> {
+    async fn sync_selected(&self, only_due: bool) -> Result<SyncOutcome, String> {
         let configs = self
             .store
             .source_configs()
@@ -214,25 +234,27 @@ impl AppServices {
             .iter()
             .map(|config| (config.id.clone(), config.display_name.clone()))
             .collect::<std::collections::HashMap<_, _>>();
-        let mut failures = Vec::new();
+        let mut outcome = SyncOutcome::default();
         for (source_id, result) in self
             .sync
             .sync_many(selected.into_iter().map(|config| config.id).collect())
             .await
         {
-            if let Err(error) = result {
-                let name = names.get(&source_id).map_or("Source", String::as_str);
-                failures.push(format!("{name}: {error}"));
+            match result {
+                Ok(_) => outcome.changed = true,
+                Err(error) => {
+                    let name = names.get(&source_id).map_or("Source", String::as_str);
+                    outcome.failures.push(format!("{name}: {error}"));
+                }
             }
         }
-        self.changes
-            .process_pending(500)
+        let projection = self
+            .changes
+            .drain_pending(500, 10_000)
             .map_err(|error| error.to_string())?;
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("; "))
-        }
+        outcome.changed |= projection.changed_work();
+        outcome.failures.extend(projection.failures);
+        Ok(outcome)
     }
 
     async fn sync_source(&self, source_id: &str) -> Result<(), String> {
@@ -247,10 +269,15 @@ impl AppServices {
             .sync(source_id)
             .await
             .map_err(|error| error.to_string())?;
-        self.changes
-            .process_pending(500)
+        let projection = self
+            .changes
+            .drain_pending(500, 10_000)
             .map_err(|error| error.to_string())?;
-        Ok(())
+        if let Some(message) = projection.failure_message() {
+            Err(message)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -287,6 +314,8 @@ struct NotionSourceView {
     settings: NotionSourceSettings,
     last_sync: Option<DateTime<Utc>>,
     last_error: Option<String>,
+    #[serde(skip_serializing)]
+    authentication_required: bool,
 }
 
 #[derive(Serialize)]
@@ -307,6 +336,8 @@ struct GoogleSourceView {
     enabled: bool,
     last_sync: Option<DateTime<Utc>>,
     last_error: Option<String>,
+    #[serde(skip_serializing)]
+    authentication_required: bool,
 }
 
 #[derive(Deserialize)]
@@ -366,9 +397,9 @@ fn slack_connections(
                 .transpose()
                 .map_err(|error| error.to_string())?;
             let last_error = runtime.as_ref().and_then(|value| value.last_error.clone());
-            let authentication_required = last_error
-                .as_deref()
-                .is_some_and(|error| error.starts_with("authentication is required"));
+            let authentication_required = runtime
+                .as_ref()
+                .is_some_and(|value| value.authentication_required());
             let status = connection_status(&connection, authentication_required);
             Ok(SlackConnectionView {
                 connection_id: connection.id,
@@ -525,17 +556,13 @@ fn notion_connections(
                         enabled: config.enabled,
                         settings,
                         last_sync: runtime.last_success_at,
+                        authentication_required: runtime.authentication_required(),
                         last_error: runtime.last_error,
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             sources.sort_by(|a, b| a.name.cmp(&b.name));
-            let reauth = sources.iter().any(|source| {
-                source
-                    .last_error
-                    .as_deref()
-                    .is_some_and(|error| error.starts_with("authentication is required"))
-            });
+            let reauth = sources.iter().any(|source| source.authentication_required);
             let status = connection_status(&connection, reauth);
             Ok(NotionConnectionView {
                 connection_id: connection.id,
@@ -585,8 +612,8 @@ async fn connect_notion(
         .notion_tokens
         .save(&connection_id, token)
         .map_err(|error| error.to_string())?;
-    let result = (|| {
-        services.store.put_connection(&Connection {
+    let result = services.store.connect_connection(
+        &Connection {
             id: connection_id.clone(),
             provider_id: ProviderId(NOTION_PROVIDER_ID.into()),
             display_name: identity.name.clone(),
@@ -595,9 +622,9 @@ async fn connect_notion(
                 "user_name": identity.name,
                 "status": "connected"
             }),
-        })?;
-        services.sync.resume_connection(&connection_id)
-    })();
+        },
+        &[],
+    );
     if let Err(error) = result {
         if let Some(previous) = previous_secret {
             let _ = services
@@ -808,17 +835,14 @@ fn google_connections(
                         name: config.display_name.clone(),
                         enabled: config.enabled,
                         last_sync: runtime.last_success_at,
+                        authentication_required: runtime.authentication_required(),
                         last_error: runtime.last_error,
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             sources.sort_by(|left, right| left.name.cmp(&right.name));
-            let authentication_required = sources.iter().any(|source| {
-                source
-                    .last_error
-                    .as_deref()
-                    .is_some_and(|error| error.starts_with("authentication is required"))
-            });
+            let authentication_required =
+                sources.iter().any(|source| source.authentication_required);
             let status = connection_status(&connection, authentication_required);
             Ok(GoogleConnectionView {
                 connection_id: connection.id,
@@ -917,41 +941,47 @@ async fn save_google_calendars(
         .calendars(&token)
         .await
         .map_err(|error| error.to_string())?;
+    let existing_configs = services
+        .store
+        .source_configs()
+        .map_err(|error| error.to_string())?;
+    let mut selected_ids = std::collections::HashSet::new();
+    let mut configs = Vec::new();
     let mut source_ids = Vec::new();
     for selection in selections {
+        if !selected_ids.insert(selection.calendar_id.clone()) {
+            return Err("the same Google Calendar was selected more than once".into());
+        }
         let calendar = available
             .iter()
             .find(|calendar| calendar.id == selection.calendar_id)
             .ok_or_else(|| "selected Google Calendar is no longer accessible".to_owned())?;
-        let existing = services
-            .store
-            .source_configs()
-            .map_err(|error| error.to_string())?
-            .into_iter()
+        let existing = existing_configs
+            .iter()
             .find(|config| google::matches_source_config(config, &connection_id, &calendar.id));
         let id = existing
-            .as_ref()
             .map(|config| config.id.clone())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        services
-            .store
-            .put_source_config(&SourceConfig {
-                id: id.clone(),
-                connection_id: connection_id.clone(),
-                source_type_id: SourceTypeId(GOOGLE_SOURCE_TYPE.into()),
+        configs.push(SourceConfig {
+            id: id.clone(),
+            connection_id: connection_id.clone(),
+            source_type_id: SourceTypeId(GOOGLE_SOURCE_TYPE.into()),
+            display_name: calendar.display_name().to_owned(),
+            enabled: true,
+            removed_at: None,
+            expected_sync_interval_seconds: GOOGLE_SYNC_INTERVAL_SECONDS,
+            settings: serde_json::to_value(GoogleCalendarSettings {
+                calendar_id: calendar.id.clone(),
                 display_name: calendar.display_name().to_owned(),
-                enabled: true,
-                removed_at: None,
-                expected_sync_interval_seconds: GOOGLE_SYNC_INTERVAL_SECONDS,
-                settings: serde_json::to_value(GoogleCalendarSettings {
-                    calendar_id: calendar.id.clone(),
-                    display_name: calendar.display_name().to_owned(),
-                })
-                .map_err(|_| "cannot encode Google Calendar settings".to_owned())?,
             })
-            .map_err(|error| error.to_string())?;
+            .map_err(|_| "cannot encode Google Calendar settings".to_owned())?,
+        });
         source_ids.push(id);
     }
+    services
+        .store
+        .put_source_configs(&configs)
+        .map_err(|error| error.to_string())?;
     Ok(source_ids)
 }
 
@@ -1063,10 +1093,17 @@ pub fn run() {
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 while !scheduler_services.stopping.load(Ordering::Relaxed) {
-                    if let Err(error) = scheduler_services.sync_due().await {
-                        eprintln!("Glancelet background sync failed: {error}");
+                    match scheduler_services.sync_due().await {
+                        Ok(outcome) => {
+                            if let Some(error) = outcome.failure_message() {
+                                eprintln!("Glancelet background sync failed: {error}");
+                            }
+                            if outcome.changed {
+                                let _ = app_handle.emit(WORK_CHANGED_EVENT, ());
+                            }
+                        }
+                        Err(error) => eprintln!("Glancelet background sync failed: {error}"),
                     }
-                    let _ = app_handle.emit(WORK_CHANGED_EVENT, ());
                     tokio::time::sleep(Duration::from_secs(30)).await;
                 }
             });
@@ -1141,7 +1178,7 @@ fn persist_slack_connection(
         .save(&connection_id, &authorization.credential)?;
 
     let result = (|| {
-        services.store.put_connection(&Connection {
+        let connection = Connection {
             id: connection_id.clone(),
             provider_id: ProviderId(SLACK_PROVIDER_ID.into()),
             display_name: format!(
@@ -1155,7 +1192,7 @@ fn persist_slack_connection(
                 "user_name": authorization.identity.user_name,
                 "status": "connected"
             }),
-        })?;
+        };
         let existing_source = services.store.source_configs()?.into_iter().find(|config| {
             config.connection_id == connection_id && config.source_type_id.0 == SLACK_SOURCE_TYPE
         });
@@ -1163,7 +1200,7 @@ fn persist_slack_connection(
             .as_ref()
             .and_then(|config| config.settings["reaction_name"].as_str())
             .unwrap_or(DEFAULT_REACTION);
-        services.store.put_source_config(&SourceConfig {
+        let source = SourceConfig {
             id: existing_source
                 .as_ref()
                 .map(|config| config.id.clone())
@@ -1180,8 +1217,8 @@ fn persist_slack_connection(
                 "user_id": authorization.identity.user_id,
                 "reaction_name": reaction
             }),
-        })?;
-        services.sync.resume_connection(&connection_id)
+        };
+        services.store.connect_connection(&connection, &[source])
     })();
     if let Err(error) = result {
         if let Some(previous) = previous_secret {
@@ -1218,8 +1255,8 @@ fn persist_google_connection(
     services
         .google_tokens
         .save(&connection_id, &authorization.credential)?;
-    let result = (|| {
-        services.store.put_connection(&Connection {
+    let result = services.store.connect_connection(
+        &Connection {
             id: connection_id.clone(),
             provider_id: ProviderId(GOOGLE_PROVIDER_ID.into()),
             display_name: authorization.identity.email.clone(),
@@ -1228,9 +1265,9 @@ fn persist_google_connection(
                 "email": authorization.identity.email,
                 "status": "connected"
             }),
-        })?;
-        services.sync.resume_connection(&connection_id)
-    })();
+        },
+        &[],
+    );
     if let Err(error) = result {
         if let Some(previous) = previous_secret {
             let _ = services
