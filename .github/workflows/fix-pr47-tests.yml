@@ -29,11 +29,11 @@ jobs:
           path = Path('crates/glancelet-core/tests/phase0.rs')
           text = path.read_text()
 
-          function_start = text.index(
+          migration_start = text.index(
               'fn migration_baseline_handles_fresh_legacy_and_reopened_databases()'
           )
-          function_end = text.index('\n#[test]\n', function_start)
-          migration_test = text[function_start:function_end]
+          migration_end = text.index('\n#[test]\n', migration_start)
+          migration_test = text[migration_start:migration_end]
           old_version = '\n        4\n    );'
           if migration_test.count(old_version) != 2:
               raise SystemExit('expected exactly two stale schema version assertions')
@@ -41,32 +41,44 @@ jobs:
               old_version,
               '\n        5\n    );',
           )
-          text = text[:function_start] + migration_test + text[function_end:]
+          text = text[:migration_start] + migration_test + text[migration_end:]
 
-          old_retry_assertion = '''    assert_eq!(
-              harness.store.source_runtime("mirror").unwrap().next_sync_at,
-              Some(at(10, 1))
-          );'''
-          new_retry_assertion = '''    let next_sync_at = harness
-              .store
-              .source_runtime("mirror")
-              .unwrap()
-              .next_sync_at
-              .expect("failed sync schedules a retry");
-          let retry_delay = next_sync_at - harness.clock.now();
-          assert!(retry_delay >= chrono::Duration::seconds(60));
-          assert!(retry_delay <= chrono::Duration::seconds(72));'''
-          if text.count(old_retry_assertion) != 1:
+          failure_start = text.index(
+              'async fn failed_fetch_does_not_deactivate_and_delta_only_applies_explicit_mutations()'
+          )
+          failure_end = text.index('\n#[tokio::test]\n', failure_start)
+          failure_test = text[failure_start:failure_end]
+          old_retry_assertion = '\n'.join([
+              '    assert_eq!(',
+              '        harness.store.source_runtime("mirror").unwrap().next_sync_at,',
+              '        Some(at(10, 1))',
+              '    );',
+          ])
+          new_retry_assertion = '\n'.join([
+              '    let next_sync_at = harness',
+              '        .store',
+              '        .source_runtime("mirror")',
+              '        .unwrap()',
+              '        .next_sync_at',
+              '        .expect("failed sync schedules a retry");',
+              '    let retry_delay = next_sync_at - harness.clock.now();',
+              '    assert!(retry_delay >= chrono::Duration::seconds(60));',
+              '    assert!(retry_delay <= chrono::Duration::seconds(72));',
+          ])
+          if failure_test.count(old_retry_assertion) != 1:
               raise SystemExit('stale retry timestamp assertion target not found exactly once')
-          text = text.replace(old_retry_assertion, new_retry_assertion)
+          failure_test = failure_test.replace(old_retry_assertion, new_retry_assertion)
+          text = text[:failure_start] + failure_test + text[failure_end:]
           path.write_text(text)
           PY
 
           cargo fmt --all
           git diff --check
 
-      - name: Validate core tests
-        run: cargo test -p glancelet-core
+      - name: Validate repaired core tests
+        run: |
+          cargo test -p glancelet-core --test phase0 migration_baseline_handles_fresh_legacy_and_reopened_databases
+          cargo test -p glancelet-core --test phase0 failed_fetch_does_not_deactivate_and_delta_only_applies_explicit_mutations
 
       - name: Commit and push repaired tests
         run: |
