@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a reproducible problem in Glancelet
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting a bug. Do not include credentials, OAuth tokens, private workspace content, or personal data.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Windows 11, macOS 15, Ubuntu 24.04
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Glancelet version or commit
+  - type: input
+    id: source
+    attributes:
+      label: Source or integration
+      placeholder: Slack, Notion, Google Calendar, fake source
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or diagnostics
+      description: Remove secrets and private provider/workspace content.
+      render: shell
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
