@@ -25,6 +25,24 @@ jobs:
       - name: Apply self-review fixes
         run: |
           python .github/agent/fix_structured_sync_review.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("apps/desktop/src/App.test.tsx")
+          text = path.read_text()
+          old = '''  fireEvent.click(screen.getByRole("button", { name: "Sync now" }));
+
+  await screen.findByText("Captured after Slack sync");
+'''
+          new = '''  fireEvent.click(screen.getByRole("button", { name: "Sync now" }));
+  fireEvent.click(screen.getByRole("button", { name: "Today" }));
+
+  await screen.findByText("Captured after Slack sync");
+'''
+          if text.count(old) != 1:
+              raise SystemExit("Slack sync test target not found exactly once")
+          path.write_text(text.replace(old, new, 1))
+          PY
           rm .github/agent/fix_structured_sync_review.py
           rm .github/workflows/apply-structured-sync-review-fix.yml
           npm ci
