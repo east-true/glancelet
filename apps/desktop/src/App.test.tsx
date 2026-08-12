@@ -407,3 +407,196 @@ test("does not send assigned-to-me mode without an assignee mapping", async () =
     }),
   );
 });
+
+test("renders successful provider data after a partial sync failure", async () => {
+  let dashboardCalls = 0;
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard") {
+      dashboardCalls += 1;
+      return Promise.resolve(
+        dashboardCalls === 1
+          ? { today: [], inbox: [] }
+          : dashboardWith("Captured from Slack"),
+      );
+    }
+    if (command === "sync_all") {
+      return Promise.resolve({
+        refreshRequired: true,
+        succeeded: [
+          {
+            sourceId: "slack-source",
+            sourceName: "Slack :todo:",
+            changedEntities: 1,
+          },
+        ],
+        failed: [
+          {
+            sourceId: "notion-source",
+            sourceName: "Notion Tasks",
+            kind: "rate_limited",
+            message: "Notion rate limited the request",
+            nextRetryAt: "2026-08-12T12:00:00Z",
+          },
+        ],
+        projectionFailures: [],
+      });
+    }
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sync" }));
+
+  await screen.findByText("Captured from Slack");
+  expect(
+    screen.getByText(/Notion Tasks: Notion rate limited/),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Sync" })).toBeEnabled();
+});
+
+test("ignores an older dashboard response that finishes last", async () => {
+  let invalidate: (() => void) | undefined;
+  const older = deferred<ReturnType<typeof dashboardWith>>();
+  const newer = deferred<ReturnType<typeof dashboardWith>>();
+  let dashboardCalls = 0;
+  mocks.listen.mockImplementation(
+    async (_event: string, handler: () => void) => {
+      invalidate = handler;
+      return () => undefined;
+    },
+  );
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command !== "dashboard") return Promise.resolve([]);
+    dashboardCalls += 1;
+    return dashboardCalls === 1 ? older.promise : newer.promise;
+  });
+
+  render(<App />);
+  await waitFor(() => expect(dashboardCalls).toBe(1));
+  await waitFor(() => expect(invalidate).toBeDefined());
+  await act(async () => invalidate?.());
+  await waitFor(() => expect(dashboardCalls).toBe(2));
+
+  await act(async () => newer.resolve(dashboardWith("Newest dashboard")));
+  await screen.findByText("Newest dashboard");
+  await act(async () => older.resolve(dashboardWith("Older dashboard")));
+
+  expect(screen.queryByText("Older dashboard")).not.toBeInTheDocument();
+  expect(screen.getByText("Newest dashboard")).toBeInTheDocument();
+});
+
+test("keeps manual sync busy while a background refresh completes", async () => {
+  let invalidate: (() => void) | undefined;
+  const manualSync = deferred<{
+    refreshRequired: boolean;
+    succeeded: unknown[];
+    failed: unknown[];
+    projectionFailures: string[];
+  }>();
+  let dashboardCalls = 0;
+  mocks.listen.mockImplementation(
+    async (_event: string, handler: () => void) => {
+      invalidate = handler;
+      return () => undefined;
+    },
+  );
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard") {
+      dashboardCalls += 1;
+      return Promise.resolve({ today: [], inbox: [] });
+    }
+    if (command === "sync_all") return manualSync.promise;
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  const syncButton = await screen.findByRole("button", { name: "Sync" });
+  fireEvent.click(syncButton);
+  expect(screen.getByRole("button", { name: "Syncing…" })).toBeDisabled();
+
+  await act(async () => invalidate?.());
+  await waitFor(() => expect(dashboardCalls).toBeGreaterThan(1));
+  expect(screen.getByRole("button", { name: "Syncing…" })).toBeDisabled();
+
+  await act(async () =>
+    manualSync.resolve({
+      refreshRequired: true,
+      succeeded: [],
+      failed: [],
+      projectionFailures: [],
+    }),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Sync" })).toBeEnabled(),
+  );
+});
+
+test("disables a work card while its command is pending", async () => {
+  const command = deferred<void>();
+  mocks.invoke.mockImplementation((name: string) => {
+    if (name === "dashboard")
+      return Promise.resolve(dashboardWith("Pending work", ["complete"]));
+    if (name === "run_work_command") return command.promise;
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  const complete = await screen.findByRole("button", { name: "Complete" });
+  fireEvent.click(complete);
+  expect(complete).toBeDisabled();
+  fireEvent.click(complete);
+  expect(
+    mocks.invoke.mock.calls.filter(([name]) => name === "run_work_command"),
+  ).toHaveLength(1);
+
+  await act(async () => command.resolve(undefined));
+  await waitFor(() => expect(complete).toBeEnabled());
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
+function dashboardWith(
+  title: string,
+  availableActions: string[] = ["dismiss"],
+) {
+  return {
+    today: [
+      {
+        id: "test-work",
+        kind: "attention",
+        title,
+        summary: null,
+        priority: null,
+        lifecycle: "active",
+        progress: null,
+        planning: null,
+        disposition: "normal",
+        pinned: false,
+        snoozedUntil: null,
+        start: null,
+        end: null,
+        due: null,
+        source: {
+          providerId: "test",
+          providerName: "Test",
+          sourceName: "Test",
+          configName: "Test",
+        },
+        canNavigate: false,
+        freshness: "fresh",
+        dimensions: {},
+        facets: {},
+        availableActions,
+      },
+    ],
+    inbox: [],
+  };
+}

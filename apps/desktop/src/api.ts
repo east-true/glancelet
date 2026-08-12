@@ -3,6 +3,29 @@ import { invoke } from "@tauri-apps/api/core";
 export type WorkKind = "action" | "event" | "attention";
 export type WorkProgress = "todo" | "doing" | "done";
 export type Freshness = "never_synced" | "fresh" | "stale";
+export type SyncFailureKind =
+  "authentication_required" | "rate_limited" | "other";
+
+export interface SyncSourceSuccess {
+  sourceId: string;
+  sourceName: string;
+  changedEntities: number;
+}
+
+export interface SyncSourceFailure {
+  sourceId: string;
+  sourceName: string;
+  kind: SyncFailureKind;
+  message: string;
+  nextRetryAt: string | null;
+}
+
+export interface SyncReport {
+  refreshRequired: boolean;
+  succeeded: SyncSourceSuccess[];
+  failed: SyncSourceFailure[];
+  projectionFailures: string[];
+}
 export type WorkAction =
   | "plan"
   | "move_to_inbox"
@@ -164,12 +187,29 @@ export type WorkCommand =
   | { type: "start_work" }
   | { type: "complete" };
 
+export function syncReportMessage(
+  report: SyncReport | null | undefined,
+): string | null {
+  if (!report) return null;
+  const failures = report.failed.map((failure) => {
+    const retry = failure.nextRetryAt
+      ? ` (next retry ${failure.nextRetryAt})`
+      : "";
+    return `${failure.sourceName}: ${failure.message}${retry}`;
+  });
+  failures.push(
+    ...report.projectionFailures.map((failure) => `Projection: ${failure}`),
+  );
+  return failures.length > 0 ? failures.join("; ") : null;
+}
+
 export const glanceletApi = {
   dashboard: () => invoke<WorkDashboard>("dashboard"),
-  sync: () => invoke<void>("sync_all"),
+  sync: () => invoke<SyncReport>("sync_all"),
   slackConnections: () => invoke<SlackConnection[]>("slack_connections"),
   connectSlack: () => invoke<void>("connect_slack"),
-  syncSource: (sourceId: string) => invoke<void>("sync_source", { sourceId }),
+  syncSource: (sourceId: string) =>
+    invoke<SyncReport>("sync_source", { sourceId }),
   updateSlackSource: (
     sourceId: string,
     reactionName: string,

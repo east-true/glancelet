@@ -1,7 +1,8 @@
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   glanceletApi,
+  syncReportMessage,
   type GoogleConnection,
   type NotionConnection,
   type NotionDataSource,
@@ -36,29 +37,82 @@ export default function App() {
   const [googleConnections, setGoogleConnections] = useState<
     GoogleConnection[]
   >([]);
-  const [busy, setBusy] = useState(true);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [connectingSlack, setConnectingSlack] = useState(false);
+  const [pendingWorkIds, setPendingWorkIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const pendingWorkIdsRef = useRef(new Set<string>());
   const [error, setError] = useState<string | null>(null);
+  const dashboardRequest = useRef(0);
+  const tabRef = useRef<Tab>("today");
 
   const refresh = useCallback(async (clearError = true) => {
+    const request = ++dashboardRequest.current;
     try {
       if (clearError) setError(null);
-      setDashboard(await glanceletApi.dashboard());
+      const next = await glanceletApi.dashboard();
+      if (request === dashboardRequest.current) setDashboard(next);
     } catch (reason) {
-      setError(String(reason));
+      if (request === dashboardRequest.current) setError(String(reason));
     } finally {
-      setBusy(false);
+      if (request === dashboardRequest.current) setInitialLoading(false);
     }
   }, []);
+
+  const refreshSlack = useCallback(async (clearError = true) => {
+    try {
+      if (clearError) setError(null);
+      setSlackConnections(await glanceletApi.slackConnections());
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }, []);
+
+  const refreshNotion = useCallback(async (clearError = true) => {
+    try {
+      if (clearError) setError(null);
+      setNotionConnections(await glanceletApi.notionConnections());
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }, []);
+
+  const refreshGoogle = useCallback(async (clearError = true) => {
+    try {
+      if (clearError) setError(null);
+      setGoogleConnections(await glanceletApi.googleConnections());
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }, []);
+
+  const refreshSources = useCallback(
+    async (clearError = true) => {
+      await Promise.all([
+        refreshSlack(clearError),
+        refreshNotion(clearError),
+        refreshGoogle(clearError),
+      ]);
+    },
+    [refreshGoogle, refreshNotion, refreshSlack],
+  );
+
+  useEffect(() => {
+    tabRef.current = tab;
+  }, [tab]);
 
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    void listen("glancelet://work-changed", () => void refresh(false)).then(
-      (dispose) => {
-        if (disposed) dispose();
-        else unlisten = dispose;
-      },
-    );
+    void listen("glancelet://work-changed", () => {
+      void refresh(false);
+      if (tabRef.current === "settings") void refreshSources(false);
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    });
     const timer = window.setInterval(
       () => void refresh(false),
       DASHBOARD_TIME_REFRESH_MS,
@@ -66,78 +120,79 @@ export default function App() {
     const initialRefresh = window.setTimeout(() => void refresh(), 0);
     return () => {
       disposed = true;
+      dashboardRequest.current += 1;
       unlisten?.();
       window.clearTimeout(initialRefresh);
       window.clearInterval(timer);
     };
-  }, [refresh]);
+  }, [refresh, refreshSources]);
 
   async function sync() {
-    setBusy(true);
-    try {
-      await glanceletApi.sync();
-      await refresh();
-    } catch (reason) {
-      setError(String(reason));
-      setBusy(false);
-    }
-  }
-
-  const refreshSlack = useCallback(async () => {
+    if (syncing) return;
+    setSyncing(true);
     try {
       setError(null);
-      setSlackConnections(await glanceletApi.slackConnections());
-    } catch (reason) {
-      setError(String(reason));
-    }
-  }, []);
-
-  const refreshNotion = useCallback(async () => {
-    try {
-      setError(null);
-      setNotionConnections(await glanceletApi.notionConnections());
-    } catch (reason) {
-      setError(String(reason));
-    }
-  }, []);
-
-  const refreshGoogle = useCallback(async () => {
-    try {
-      setError(null);
-      setGoogleConnections(await glanceletApi.googleConnections());
-    } catch (reason) {
-      setError(String(reason));
-    }
-  }, []);
-
-  async function selectTab(next: Tab) {
-    setTab(next);
-    if (next === "settings") {
-      await Promise.all([refreshSlack(), refreshNotion(), refreshGoogle()]);
-    }
-  }
-
-  async function connectSlack() {
-    setBusy(true);
-    try {
-      await glanceletApi.connectSlack();
-      await refreshSlack();
-      await refresh();
+      const report = await glanceletApi.sync();
+      await Promise.all([
+        refresh(false),
+        tabRef.current === "settings"
+          ? refreshSources(false)
+          : Promise.resolve(),
+      ]);
+      setError(syncReportMessage(report));
     } catch (reason) {
       setError(String(reason));
     } finally {
-      setBusy(false);
+      setSyncing(false);
+    }
+  }
+
+  async function selectTab(next: Tab) {
+    tabRef.current = next;
+    setTab(next);
+    if (next === "settings") await refreshSources();
+  }
+
+  async function connectSlack() {
+    if (connectingSlack) return;
+    setConnectingSlack(true);
+    try {
+      setError(null);
+      await glanceletApi.connectSlack();
+      await Promise.all([refreshSlack(false), refresh(false)]);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setConnectingSlack(false);
     }
   }
 
   async function run(workId: string, command: WorkCommand) {
+    if (pendingWorkIdsRef.current.has(workId)) return;
+    pendingWorkIdsRef.current.add(workId);
+    setPendingWorkIds(new Set(pendingWorkIdsRef.current));
     try {
+      setError(null);
       await glanceletApi.command(workId, command);
-      await refresh();
+      await refresh(false);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      pendingWorkIdsRef.current.delete(workId);
+      setPendingWorkIds(new Set(pendingWorkIdsRef.current));
+    }
+  }
+
+  async function open(workId: string) {
+    try {
+      setError(null);
+      await glanceletApi.openSource(workId);
     } catch (reason) {
       setError(String(reason));
     }
   }
+
+  const globalBusy = initialLoading || syncing;
 
   return (
     <main className="hud-shell">
@@ -148,10 +203,10 @@ export default function App() {
         </div>
         <button
           className="sync-button"
-          disabled={busy}
+          disabled={globalBusy}
           onClick={() => void sync()}
         >
-          {busy ? "Syncing…" : "Sync"}
+          {initialLoading ? "Loading…" : syncing ? "Syncing…" : "Sync"}
         </button>
       </header>
 
@@ -176,21 +231,21 @@ export default function App() {
       {tab === "settings" ? (
         <div className="settings-stack">
           <SlackSettings
-            busy={busy}
+            busy={globalBusy || connectingSlack}
             connections={slackConnections}
             connect={connectSlack}
             refresh={refreshSlack}
             setError={setError}
           />
           <NotionSettings
-            busy={busy}
+            busy={globalBusy}
             connections={notionConnections}
             refresh={refreshNotion}
             refreshWork={refresh}
             setError={setError}
           />
           <GoogleSettings
-            busy={busy}
+            busy={globalBusy}
             connections={googleConnections}
             refresh={refreshGoogle}
             refreshWork={refresh}
@@ -199,7 +254,7 @@ export default function App() {
         </div>
       ) : (
         <section className="work-list" aria-live="polite">
-          {!busy && dashboard[tab].length === 0 ? (
+          {!initialLoading && dashboard[tab].length === 0 ? (
             <div className="empty-state">
               <span>All clear</span>
               <p>
@@ -210,7 +265,13 @@ export default function App() {
             </div>
           ) : (
             dashboard[tab].map((work) => (
-              <WorkCard key={work.id} work={work} run={run} />
+              <WorkCard
+                key={work.id}
+                work={work}
+                pending={pendingWorkIds.has(work.id)}
+                run={run}
+                open={open}
+              />
             ))
           )}
         </section>
@@ -426,8 +487,9 @@ function NotionConnectionCard({
               disabled={working || !source.enabled}
               onClick={() =>
                 void action(async () => {
-                  await glanceletApi.syncSource(source.sourceId);
+                  const report = await glanceletApi.syncSource(source.sourceId);
                   await Promise.all([refresh(), refreshWork()]);
+                  setError(syncReportMessage(report));
                 })
               }
             >
@@ -723,20 +785,26 @@ function PropertySelect({
 
 function WorkCard({
   work,
+  pending,
   run,
+  open,
 }: {
   work: WorkView;
+  pending: boolean;
   run: (id: string, command: WorkCommand) => Promise<void>;
+  open: (id: string) => Promise<void>;
 }) {
   const supports = (action: WorkAction) =>
     work.availableActions.includes(action);
-  const open = () =>
-    supports("open_source") && void glanceletApi.openSource(work.id);
   const today = localDateString(new Date());
 
   return (
-    <article className={`work-card kind-${work.kind}`}>
-      <button className="work-main" disabled={!work.canNavigate} onClick={open}>
+    <article className={`work-card kind-${work.kind}`} aria-busy={pending}>
+      <button
+        className="work-main"
+        disabled={pending || !work.canNavigate}
+        onClick={() => void open(work.id)}
+      >
         <span className="kind-mark" aria-hidden="true" />
         <span className="work-copy">
           <span className="work-meta">
@@ -753,17 +821,24 @@ function WorkCard({
       </button>
       <div className="work-actions">
         {supports("start_work") && (
-          <button onClick={() => void run(work.id, { type: "start_work" })}>
+          <button
+            disabled={pending}
+            onClick={() => void run(work.id, { type: "start_work" })}
+          >
             Start
           </button>
         )}
         {supports("complete") && (
-          <button onClick={() => void run(work.id, { type: "complete" })}>
+          <button
+            disabled={pending}
+            onClick={() => void run(work.id, { type: "complete" })}
+          >
             Complete
           </button>
         )}
         {supports("move_to_backlog") && (
           <button
+            disabled={pending}
             onClick={() => void run(work.id, { type: "move_to_backlog" })}
           >
             Backlog
@@ -771,18 +846,23 @@ function WorkCard({
         )}
         {supports("plan") && (
           <button
+            disabled={pending}
             onClick={() => void run(work.id, { type: "plan", date: today })}
           >
             Today
           </button>
         )}
         {supports("move_to_inbox") && work.planning?.type !== "inbox" && (
-          <button onClick={() => void run(work.id, { type: "move_to_inbox" })}>
+          <button
+            disabled={pending}
+            onClick={() => void run(work.id, { type: "move_to_inbox" })}
+          >
             Inbox
           </button>
         )}
         {supports("snooze") && (
           <button
+            disabled={pending}
             onClick={() => {
               const until = new Date(Date.now() + 60 * 60 * 1000).toISOString();
               void run(work.id, { type: "snooze", until });
@@ -792,12 +872,16 @@ function WorkCard({
           </button>
         )}
         {supports("dismiss") && (
-          <button onClick={() => void run(work.id, { type: "dismiss" })}>
+          <button
+            disabled={pending}
+            onClick={() => void run(work.id, { type: "dismiss" })}
+          >
             Dismiss
           </button>
         )}
         <button
           aria-label={work.pinned ? "Unpin" : "Pin"}
+          disabled={pending}
           onClick={() =>
             void run(work.id, { type: work.pinned ? "unpin" : "pin" })
           }
@@ -861,12 +945,13 @@ function SlackConnectionCard({
   const [reaction, setReaction] = useState(connection.reactionName);
   const [working, setWorking] = useState(false);
 
-  async function action(task: () => Promise<void>) {
+  async function action(task: () => Promise<string | null | void>) {
     setWorking(true);
     try {
       setError(null);
-      await task();
+      const message = await task();
       await refresh();
+      if (message) setError(message);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -902,8 +987,12 @@ function SlackConnectionCard({
             <button
               disabled={working || !connection.enabled}
               onClick={() =>
-                void action(() =>
-                  glanceletApi.syncSource(connection.sourceId as string),
+                void action(async () =>
+                  syncReportMessage(
+                    await glanceletApi.syncSource(
+                      connection.sourceId as string,
+                    ),
+                  ),
                 )
               }
             >

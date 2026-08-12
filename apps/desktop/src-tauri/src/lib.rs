@@ -13,8 +13,8 @@ use glancelet_core::sources::fake::{self, CAPTURE_SOURCE_TYPE, MIRROR_SOURCE_TYP
 use glancelet_core::{
     application::{
         Clock, ConnectionCommandService, NavigationService, SecretStore, SourceChangeProcessor,
-        SyncCoordinator, SystemClock, TimeContext, WorkCommandService, WorkDashboard,
-        WorkReadService, WorkStore,
+        SourceFailureKind, SyncCoordinator, SystemClock, TimeContext, WorkCommandService,
+        WorkDashboard, WorkReadService, WorkStore,
     },
     domain::{ProviderId, SourceTypeId},
     extension::{Connection, ExtensionRegistry, SourceConfig},
@@ -33,6 +33,7 @@ use glancelet_core::{
         PROVIDER_ID as SLACK_PROVIDER_ID, SOURCE_TYPE as SLACK_SOURCE_TYPE,
     },
     storage::{KeyringSecretStore, SqliteWorkStore},
+    GlanceletError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -71,23 +72,54 @@ struct AppServices {
     stopping: Arc<AtomicBool>,
 }
 
-#[derive(Debug, Default)]
-struct SyncOutcome {
-    changed: bool,
-    failures: Vec<String>,
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncReport {
+    refresh_required: bool,
+    succeeded: Vec<SyncSourceSuccess>,
+    failed: Vec<SyncSourceFailure>,
+    projection_failures: Vec<String>,
 }
 
-impl SyncOutcome {
-    fn into_result(self) -> Result<(), String> {
-        if self.failures.is_empty() {
-            Ok(())
-        } else {
-            Err(self.failures.join("; "))
-        }
-    }
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncSourceSuccess {
+    source_id: String,
+    source_name: String,
+    changed_entities: usize,
+}
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncSourceFailure {
+    source_id: String,
+    source_name: String,
+    kind: SourceFailureKind,
+    message: String,
+    next_retry_at: Option<DateTime<Utc>>,
+}
+
+impl SyncReport {
     fn failure_message(&self) -> Option<String> {
-        (!self.failures.is_empty()).then(|| self.failures.join("; "))
+        let mut failures = self
+            .failed
+            .iter()
+            .map(|failure| format!("{}: {}", failure.source_name, failure.message))
+            .collect::<Vec<_>>();
+        failures.extend(
+            self.projection_failures
+                .iter()
+                .map(|failure| format!("Projection: {failure}")),
+        );
+        (!failures.is_empty()).then(|| failures.join("; "))
+    }
+}
+
+fn sync_failure_kind(error: &GlanceletError) -> SourceFailureKind {
+    match error {
+        GlanceletError::AuthenticationRequired(_) => SourceFailureKind::AuthenticationRequired,
+        GlanceletError::RateLimited { .. } => SourceFailureKind::RateLimited,
+        _ => SourceFailureKind::Other,
     }
 }
 
@@ -197,15 +229,15 @@ impl AppServices {
         }))
     }
 
-    async fn sync_all(&self) -> Result<(), String> {
-        self.sync_selected(false).await?.into_result()
+    async fn sync_all(&self) -> Result<SyncReport, String> {
+        self.sync_selected(false).await
     }
 
-    async fn sync_due(&self) -> Result<SyncOutcome, String> {
+    async fn sync_due(&self) -> Result<SyncReport, String> {
         self.sync_selected(true).await
     }
 
-    async fn sync_selected(&self, only_due: bool) -> Result<SyncOutcome, String> {
+    async fn sync_selected(&self, only_due: bool) -> Result<SyncReport, String> {
         let configs = self
             .store
             .source_configs()
@@ -234,17 +266,37 @@ impl AppServices {
             .iter()
             .map(|config| (config.id.clone(), config.display_name.clone()))
             .collect::<std::collections::HashMap<_, _>>();
-        let mut outcome = SyncOutcome::default();
+        let mut report = SyncReport::default();
         for (source_id, result) in self
             .sync
             .sync_many(selected.into_iter().map(|config| config.id).collect())
             .await
         {
+            report.refresh_required = true;
+            let source_name = names
+                .get(&source_id)
+                .cloned()
+                .unwrap_or_else(|| "Source".into());
             match result {
-                Ok(_) => outcome.changed = true,
+                Ok(changed_entities) => report.succeeded.push(SyncSourceSuccess {
+                    source_id,
+                    source_name,
+                    changed_entities,
+                }),
                 Err(error) => {
-                    let name = names.get(&source_id).map_or("Source", String::as_str);
-                    outcome.failures.push(format!("{name}: {error}"));
+                    let runtime = self.store.source_runtime(&source_id).ok();
+                    let kind = runtime
+                        .as_ref()
+                        .and_then(|runtime| runtime.failure_kind)
+                        .unwrap_or_else(|| sync_failure_kind(&error));
+                    let next_retry_at = runtime.and_then(|runtime| runtime.next_sync_at);
+                    report.failed.push(SyncSourceFailure {
+                        source_id,
+                        source_name,
+                        kind,
+                        message: error.to_string(),
+                        next_retry_at,
+                    });
                 }
             }
         }
@@ -252,12 +304,12 @@ impl AppServices {
             .changes
             .drain_pending(500, 10_000)
             .map_err(|error| error.to_string())?;
-        outcome.changed |= projection.changed_work();
-        outcome.failures.extend(projection.failures);
-        Ok(outcome)
+        report.refresh_required |= projection.changed_work() || !projection.failures.is_empty();
+        report.projection_failures = projection.failures;
+        Ok(report)
     }
 
-    async fn sync_source(&self, source_id: &str) -> Result<(), String> {
+    async fn sync_source(&self, source_id: &str) -> Result<SyncReport, String> {
         let config = self
             .store
             .source_config(source_id)
@@ -265,19 +317,39 @@ impl AppServices {
         if !config.enabled || config.removed_at.is_some() {
             return Err("source is disabled or removed".into());
         }
-        self.sync
-            .sync(source_id)
-            .await
-            .map_err(|error| error.to_string())?;
+        let mut report = SyncReport {
+            refresh_required: true,
+            ..SyncReport::default()
+        };
+        match self.sync.sync(source_id).await {
+            Ok(changed_entities) => report.succeeded.push(SyncSourceSuccess {
+                source_id: source_id.into(),
+                source_name: config.display_name.clone(),
+                changed_entities,
+            }),
+            Err(error) => {
+                let runtime = self.store.source_runtime(source_id).ok();
+                let kind = runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.failure_kind)
+                    .unwrap_or_else(|| sync_failure_kind(&error));
+                let next_retry_at = runtime.and_then(|runtime| runtime.next_sync_at);
+                report.failed.push(SyncSourceFailure {
+                    source_id: source_id.into(),
+                    source_name: config.display_name.clone(),
+                    kind,
+                    message: error.to_string(),
+                    next_retry_at,
+                });
+            }
+        }
         let projection = self
             .changes
             .drain_pending(500, 10_000)
             .map_err(|error| error.to_string())?;
-        if let Some(message) = projection.failure_message() {
-            Err(message)
-        } else {
-            Ok(())
-        }
+        report.refresh_required |= projection.changed_work() || !projection.failures.is_empty();
+        report.projection_failures = projection.failures;
+        Ok(report)
     }
 }
 
@@ -369,7 +441,7 @@ fn dashboard(services: State<'_, Arc<AppServices>>) -> Result<WorkDashboard, Str
 }
 
 #[tauri::command]
-async fn sync_all(services: State<'_, Arc<AppServices>>) -> Result<(), String> {
+async fn sync_all(services: State<'_, Arc<AppServices>>) -> Result<SyncReport, String> {
     services.sync_all().await
 }
 
@@ -475,7 +547,7 @@ async fn connect_slack(
 async fn sync_source(
     services: State<'_, Arc<AppServices>>,
     source_id: String,
-) -> Result<(), String> {
+) -> Result<SyncReport, String> {
     services.sync_source(&source_id).await
 }
 
@@ -1094,11 +1166,11 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 while !scheduler_services.stopping.load(Ordering::Relaxed) {
                     match scheduler_services.sync_due().await {
-                        Ok(outcome) => {
-                            if let Some(error) = outcome.failure_message() {
+                        Ok(report) => {
+                            if let Some(error) = report.failure_message() {
                                 eprintln!("Glancelet background sync failed: {error}");
                             }
-                            if outcome.changed {
+                            if report.refresh_required {
                                 let _ = app_handle.emit(WORK_CHANGED_EVENT, ());
                             }
                         }

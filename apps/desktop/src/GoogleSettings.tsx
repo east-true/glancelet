@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   glanceletApi,
+  syncReportMessage,
   type GoogleCalendar,
   type GoogleConnection,
 } from "./api";
@@ -107,6 +108,20 @@ function GoogleConnectionCard({
     }
   }
 
+  async function syncSource(sourceId: string) {
+    setLoading(true);
+    try {
+      setError(null);
+      const report = await glanceletApi.syncSource(sourceId);
+      await Promise.all([refresh(), refreshWork()]);
+      setError(syncReportMessage(report));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <article className="connection-card">
       <div className="connection-title">
@@ -130,9 +145,7 @@ function GoogleConnectionCard({
           <div className="source-actions">
             <button
               disabled={loading || !source.enabled}
-              onClick={() =>
-                void act(() => glanceletApi.syncSource(source.sourceId), true)
-              }
+              onClick={() => void syncSource(source.sourceId)}
             >
               Sync now
             </button>
