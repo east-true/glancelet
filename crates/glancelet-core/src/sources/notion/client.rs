@@ -111,13 +111,45 @@ impl NotionApiClient {
         settings: &NotionSourceSettings,
         schema: &NotionDataSource,
     ) -> Result<Vec<NotionPage>> {
+        self.query_pages_limited(token, settings, schema, None, true)
+            .await
+    }
+
+    pub(crate) async fn preview_pages(
+        &self,
+        token: &str,
+        settings: &NotionSourceSettings,
+        schema: &NotionDataSource,
+        limit: usize,
+    ) -> Result<Vec<NotionPage>> {
+        self.query_pages_limited(token, settings, schema, Some(limit), false)
+            .await
+    }
+
+    async fn query_pages_limited(
+        &self,
+        token: &str,
+        settings: &NotionSourceSettings,
+        schema: &NotionDataSource,
+        max_results: Option<usize>,
+        require_complete: bool,
+    ) -> Result<Vec<NotionPage>> {
+        if max_results == Some(0) {
+            return Ok(Vec::new());
+        }
         let filter = build_task_filter(settings, schema)?;
         let filter_properties = mapped_property_ids(settings);
         let mut cursor: Option<String> = None;
         let mut pages = Vec::new();
         loop {
+            let remaining = max_results
+                .map(|limit| limit.saturating_sub(pages.len()))
+                .unwrap_or(100);
+            if remaining == 0 {
+                break;
+            }
             let mut body = Map::new();
-            body.insert("page_size".into(), json!(100));
+            body.insert("page_size".into(), json!(remaining.min(100)));
             body.insert("result_type".into(), json!("page"));
             if let Some(filter) = filter.clone() {
                 body.insert("filter".into(), filter);
@@ -145,17 +177,18 @@ impl NotionApiClient {
                     ),
                 )
                 .await?;
-            if response
-                .request_status
-                .as_ref()
-                .is_some_and(|status| status.kind == "incomplete")
+            if require_complete
+                && response
+                    .request_status
+                    .as_ref()
+                    .is_some_and(|status| status.kind == "incomplete")
             {
                 return Err(GlanceletError::Source(
                     "Notion query exceeded the complete snapshot limit".into(),
                 ));
             }
-            pages.extend(response.results);
-            if !response.has_more {
+            pages.extend(response.results.into_iter().take(remaining));
+            if max_results.is_some_and(|limit| pages.len() >= limit) || !response.has_more {
                 break;
             }
             cursor = Some(

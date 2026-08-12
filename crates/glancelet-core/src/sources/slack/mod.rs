@@ -4,7 +4,10 @@ mod oauth;
 pub use client::*;
 pub use oauth::*;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Weak},
+};
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -59,7 +62,7 @@ pub struct SlackTokenProvider {
     client: Arc<SlackApiClient>,
     secrets: Arc<dyn SecretStore>,
     clock: Arc<dyn Clock>,
-    locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    locks: std::sync::Mutex<HashMap<String, Weak<Mutex<()>>>>,
 }
 
 impl SlackTokenProvider {
@@ -93,11 +96,14 @@ impl SlackTokenProvider {
         let key = credential_key(connection_id);
         let lock = {
             let mut locks = self.locks.lock().expect("Slack token lock map poisoned");
-            Arc::clone(
-                locks
-                    .entry(key.clone())
-                    .or_insert_with(|| Arc::new(Mutex::new(()))),
-            )
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(key.clone(), Arc::downgrade(&lock));
+                lock
+            }
         };
         let _guard = lock.lock().await;
         let raw = self.secrets.get(&key)?.ok_or_else(|| {
