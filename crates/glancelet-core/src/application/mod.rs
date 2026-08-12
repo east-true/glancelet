@@ -29,7 +29,10 @@ use crate::{
 #[serde(rename_all = "snake_case")]
 pub enum SourceFailureKind {
     AuthenticationRequired,
+    ConfigurationRequired,
     RateLimited,
+    TransientNetwork,
+    ProviderFailure,
     Other,
 }
 
@@ -48,6 +51,29 @@ pub struct SourceRuntime {
 impl SourceRuntime {
     pub fn authentication_required(&self) -> bool {
         self.failure_kind == Some(SourceFailureKind::AuthenticationRequired)
+    }
+
+    pub fn automatic_retry_blocked(&self) -> bool {
+        matches!(
+            self.failure_kind,
+            Some(
+                SourceFailureKind::AuthenticationRequired
+                    | SourceFailureKind::ConfigurationRequired
+            )
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectionFailureState {
+    pub failure_count: i64,
+    pub next_retry_at: Option<DateTime<Utc>>,
+    pub quarantined_at: Option<DateTime<Utc>>,
+}
+
+impl ProjectionFailureState {
+    pub fn quarantined(&self) -> bool {
+        self.quarantined_at.is_some()
     }
 }
 
@@ -119,12 +145,17 @@ pub trait WorkStore: Send + Sync {
     fn pending_source_changes(&self, limit: usize) -> Result<Vec<SourceChange>> {
         self.pending_source_changes_at(limit, Utc::now())
     }
+    #[allow(clippy::too_many_arguments)]
     fn record_projection_failure(
         &self,
         change_id: i64,
-        next_retry_at: DateTime<Utc>,
+        projector_version: i32,
+        failed_at: DateTime<Utc>,
+        retry_base_seconds: i64,
+        retry_max_seconds: i64,
+        max_attempts: i64,
         error: &str,
-    ) -> Result<()>;
+    ) -> Result<ProjectionFailureState>;
     fn enqueue_reprojections(
         &self,
         source_config_id: &str,

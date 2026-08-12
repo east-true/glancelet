@@ -421,21 +421,21 @@ async fn decode_response<T: DeserializeOwned>(
         )));
     }
     if status == StatusCode::FORBIDDEN {
-        return Err(GlanceletError::Source(
+        return Err(GlanceletError::ConfigurationRequired(
             "Google denied access to this Calendar operation".into(),
         ));
     }
-    if status == StatusCode::NOT_FOUND {
-        return Err(GlanceletError::Source(
-            "Google Calendar is unavailable or inaccessible".into(),
-        ));
+    if status == StatusCode::NOT_FOUND || status.is_client_error() {
+        return Err(GlanceletError::ConfigurationRequired(format!(
+            "Google Calendar rejected the request ({status})"
+        )));
     }
     if status.is_server_error() {
-        return Err(GlanceletError::Source(
+        return Err(GlanceletError::ProviderFailure(
             "Google Calendar is temporarily unavailable".into(),
         ));
     }
-    Err(GlanceletError::Source(format!(
+    Err(GlanceletError::ProviderFailure(format!(
         "Google Calendar rejected the request ({status})"
     )))
 }
@@ -453,13 +453,13 @@ fn default_event_type() -> String {
 }
 
 fn malformed(message: &str) -> GlanceletError {
-    GlanceletError::Source(message.into())
+    GlanceletError::ProviderFailure(message.into())
 }
 
 fn network_error(error: reqwest::Error) -> GlanceletError {
     if error.is_timeout() {
-        GlanceletError::Source("Google request timed out".into())
+        GlanceletError::TransientNetwork("Google request timed out".into())
     } else {
-        GlanceletError::Source("Google network request failed".into())
+        GlanceletError::TransientNetwork("Google network request failed".into())
     }
 }

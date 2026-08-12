@@ -9,7 +9,10 @@ mod secrets;
 pub use secrets::*;
 
 use crate::{
-    application::{SourceFailureKind, SourceRuntime, StoredWork, WorkMutation, WorkStore},
+    application::{
+        ProjectionFailureState, SourceFailureKind, SourceRuntime, StoredWork, WorkMutation,
+        WorkStore,
+    },
     domain::{
         LocalDisposition, ProgressAuthority, ProviderId, SourceBatch, SourceBatchKind,
         SourceChange, SourceChangeKind, SourceEntity, SourceIdentity, SourceMutation, WorkBinding,
@@ -109,7 +112,10 @@ impl SqliteWorkStore {
                    processed_at TEXT,
                    projection_failure_count INTEGER NOT NULL DEFAULT 0,
                    projection_last_error TEXT,
-                   projection_next_retry_at TEXT
+                   projection_next_retry_at TEXT,
+                   projection_quarantined_at TEXT,
+                   projection_projector_version INTEGER,
+                   projection_superseded_at TEXT
                  );
                  CREATE INDEX IF NOT EXISTS source_changes_pending
                    ON source_changes(processed_at, id);
@@ -309,6 +315,61 @@ impl SqliteWorkStore {
                 .execute(
                     "INSERT INTO schema_migrations(version, name)
                      VALUES (4, '004_core_consistency')",
+                    [],
+                )
+                .map_err(storage_error)?;
+        }
+        let retry_quarantine_applied = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=5)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(storage_error)?;
+        if !retry_quarantine_applied {
+            let columns = {
+                let mut statement = transaction
+                    .prepare("PRAGMA table_info(source_changes)")
+                    .map_err(storage_error)?;
+                let columns = statement
+                    .query_map([], |row| row.get::<_, String>(1))
+                    .map_err(storage_error)?
+                    .collect::<std::result::Result<HashSet<_>, _>>()
+                    .map_err(storage_error)?;
+                columns
+            };
+            if !columns.contains("projection_quarantined_at") {
+                transaction
+                    .execute_batch(
+                        "ALTER TABLE source_changes ADD COLUMN projection_quarantined_at TEXT;",
+                    )
+                    .map_err(storage_error)?;
+            }
+            if !columns.contains("projection_projector_version") {
+                transaction
+                    .execute_batch(
+                        "ALTER TABLE source_changes ADD COLUMN projection_projector_version INTEGER;",
+                    )
+                    .map_err(storage_error)?;
+            }
+            if !columns.contains("projection_superseded_at") {
+                transaction
+                    .execute_batch(
+                        "ALTER TABLE source_changes ADD COLUMN projection_superseded_at TEXT;",
+                    )
+                    .map_err(storage_error)?;
+            }
+            transaction
+                .execute_batch(
+                    "CREATE INDEX IF NOT EXISTS source_changes_projection_ready
+                       ON source_changes(processed_at, projection_quarantined_at,
+                                         projection_superseded_at, projection_next_retry_at, id);",
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version, name)
+                     VALUES (5, '005_retry_backoff_projection_quarantine')",
                     [],
                 )
                 .map_err(storage_error)?;
@@ -710,11 +771,15 @@ impl WorkStore for SqliteWorkStore {
                 "SELECT id, kind, entity_snapshot_json, occurred_at, processed_at
                  FROM source_changes
                  WHERE processed_at IS NULL
+                   AND projection_quarantined_at IS NULL
+                   AND projection_superseded_at IS NULL
                    AND (projection_next_retry_at IS NULL OR projection_next_retry_at<=?1)
                    AND NOT EXISTS (
                      SELECT 1 FROM source_changes earlier
                      WHERE earlier.source_entity_id=source_changes.source_entity_id
                        AND earlier.processed_at IS NULL
+                       AND earlier.projection_quarantined_at IS NULL
+                       AND earlier.projection_superseded_at IS NULL
                        AND earlier.id<source_changes.id
                    )
                  ORDER BY id LIMIT ?2",
@@ -744,27 +809,83 @@ impl WorkStore for SqliteWorkStore {
     fn record_projection_failure(
         &self,
         change_id: i64,
-        next_retry_at: DateTime<Utc>,
+        projector_version: i32,
+        failed_at: DateTime<Utc>,
+        retry_base_seconds: i64,
+        retry_max_seconds: i64,
+        max_attempts: i64,
         error: &str,
-    ) -> Result<()> {
-        let updated = self
-            .connection
-            .lock()
-            .expect("sqlite connection poisoned")
+    ) -> Result<ProjectionFailureState> {
+        if retry_base_seconds <= 0 || retry_max_seconds < retry_base_seconds || max_attempts <= 0 {
+            return Err(GlanceletError::InvalidOperation(
+                "invalid projection retry policy".into(),
+            ));
+        }
+        let mut database = self.connection.lock().expect("sqlite connection poisoned");
+        let transaction = database.transaction().map_err(storage_error)?;
+        let current = transaction
+            .query_row(
+                "SELECT projection_failure_count, processed_at, projection_quarantined_at
+                 FROM source_changes WHERE id=?1",
+                [change_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(storage_error)?
+            .ok_or_else(|| GlanceletError::NotFound(format!("source change {change_id}")))?;
+        if current.1.is_some() || current.2.is_some() {
+            return Err(GlanceletError::InvalidOperation(
+                "projection failure can only be recorded for an active pending change".into(),
+            ));
+        }
+        let failure_count = current.0.saturating_add(1);
+        let quarantined_at = (failure_count >= max_attempts).then_some(failed_at);
+        let next_retry_at = quarantined_at.is_none().then(|| {
+            failed_at
+                + chrono::Duration::seconds(projection_retry_delay_seconds(
+                    change_id,
+                    failure_count,
+                    retry_base_seconds,
+                    retry_max_seconds,
+                ))
+        });
+        let updated = transaction
             .execute(
                 "UPDATE source_changes
-                 SET projection_failure_count=projection_failure_count+1,
-                     projection_last_error=?2, projection_next_retry_at=?3
-                 WHERE id=?1 AND processed_at IS NULL",
-                params![change_id, error, timestamp(next_retry_at)],
+                 SET projection_failure_count=?2,
+                     projection_last_error=?3,
+                     projection_next_retry_at=?4,
+                     projection_quarantined_at=?5,
+                     projection_projector_version=?6
+                 WHERE id=?1 AND processed_at IS NULL
+                   AND projection_quarantined_at IS NULL",
+                params![
+                    change_id,
+                    failure_count,
+                    error,
+                    next_retry_at.map(timestamp),
+                    quarantined_at.map(timestamp),
+                    projector_version
+                ],
             )
             .map_err(storage_error)?;
         if updated == 0 {
-            return Err(GlanceletError::NotFound(format!(
-                "pending source change {change_id}"
-            )));
+            return Err(GlanceletError::InvalidOperation(
+                "projection failure state changed concurrently".into(),
+            ));
         }
-        Ok(())
+        transaction.commit().map_err(storage_error)?;
+        Ok(ProjectionFailureState {
+            failure_count,
+            next_retry_at,
+            quarantined_at,
+        })
     }
 
     fn enqueue_reprojections(
@@ -783,16 +904,29 @@ impl WorkStore for SqliteWorkStore {
                             se.display_json, se.metadata_json, se.navigation_json,
                             se.created_at, se.updated_at
                      FROM source_entities se
-                     JOIN work_bindings wb ON wb.id=(
+                     LEFT JOIN work_bindings wb ON wb.id=(
                        SELECT latest.id FROM work_bindings latest
                        WHERE latest.source_entity_id=se.id
                        ORDER BY latest.source_activation_seq DESC, latest.id DESC LIMIT 1
                      )
                      WHERE se.source_config_id=?1 AND se.active=1
-                       AND wb.projector_version<?2
+                       AND (
+                         (wb.id IS NOT NULL AND wb.projector_version<?2)
+                         OR EXISTS (
+                           SELECT 1 FROM source_changes quarantined
+                           WHERE quarantined.source_entity_id=se.id
+                             AND quarantined.processed_at IS NULL
+                             AND quarantined.projection_quarantined_at IS NOT NULL
+                             AND quarantined.projection_superseded_at IS NULL
+                             AND COALESCE(quarantined.projection_projector_version, 0)<?2
+                         )
+                       )
                        AND NOT EXISTS (
                          SELECT 1 FROM source_changes pending
-                         WHERE pending.source_entity_id=se.id AND pending.processed_at IS NULL
+                         WHERE pending.source_entity_id=se.id
+                           AND pending.processed_at IS NULL
+                           AND pending.projection_quarantined_at IS NULL
+                           AND pending.projection_superseded_at IS NULL
                        )",
                 )
                 .map_err(storage_error)?;
@@ -807,6 +941,18 @@ impl WorkStore for SqliteWorkStore {
             entities
         };
         for entity in &entities {
+            transaction
+                .execute(
+                    "UPDATE source_changes
+                     SET projection_superseded_at=?3
+                     WHERE source_entity_id=?1
+                       AND processed_at IS NULL
+                       AND projection_quarantined_at IS NOT NULL
+                       AND projection_superseded_at IS NULL
+                       AND COALESCE(projection_projector_version, 0)<?2",
+                    params![entity.id, projector_version, timestamp(now)],
+                )
+                .map_err(storage_error)?;
             insert_change(&transaction, entity, SourceChangeKind::Updated, now)?;
         }
         transaction.commit().map_err(storage_error)?;
@@ -864,7 +1010,7 @@ impl WorkStore for SqliteWorkStore {
             .execute(
                 "UPDATE source_changes
                  SET processed_at=?2, projection_last_error=NULL,
-                     projection_next_retry_at=NULL
+                     projection_next_retry_at=NULL, projection_quarantined_at=NULL
                  WHERE id=?1 AND processed_at IS NULL",
                 params![change.id, timestamp(now)],
             )
@@ -1103,11 +1249,17 @@ fn put_source_config_tx(transaction: &Transaction<'_>, config: &SourceConfig) ->
         )
         .map_err(storage_error)?;
     if existing_removed.is_some() {
+        let configuration_required = json(&SourceFailureKind::ConfigurationRequired)?;
         transaction
             .execute(
-                "UPDATE source_runtime SET config_revision=config_revision+1
+                "UPDATE source_runtime
+                 SET config_revision=config_revision+1,
+                     next_sync_at=CASE WHEN failure_kind=?2 THEN NULL ELSE next_sync_at END,
+                     failure_count=CASE WHEN failure_kind=?2 THEN 0 ELSE failure_count END,
+                     last_error=CASE WHEN failure_kind=?2 THEN NULL ELSE last_error END,
+                     failure_kind=CASE WHEN failure_kind=?2 THEN NULL ELSE failure_kind END
                  WHERE source_config_id=?1",
-                [&config.id],
+                params![config.id, configuration_required],
             )
             .map_err(storage_error)?;
     }
@@ -1142,6 +1294,22 @@ fn resume_connection_tx(transaction: &Transaction<'_>, connection_id: &str) -> R
         )
         .map_err(storage_error)?;
     Ok(())
+}
+
+fn projection_retry_delay_seconds(
+    change_id: i64,
+    failure_count: i64,
+    base_seconds: i64,
+    max_seconds: i64,
+) -> i64 {
+    let exponent = (failure_count.saturating_sub(1)).clamp(0, 12) as u32;
+    let multiplier = 1_i64.checked_shl(exponent).unwrap_or(i64::MAX);
+    let without_jitter = base_seconds.saturating_mul(multiplier).min(max_seconds);
+    let jitter_window = (without_jitter / 10).max(1);
+    let seed = change_id.unsigned_abs() ^ failure_count as u64;
+    without_jitter
+        .saturating_add((seed % (jitter_window as u64 + 1)) as i64)
+        .min(max_seconds)
 }
 
 fn ensure_current_sync(updated: usize) -> Result<()> {
@@ -1445,6 +1613,8 @@ fn apply_capture_projection(
         SourceChangeKind::Updated => {
             if let Some(binding) = existing {
                 update_projected_fields(transaction, &binding, draft, projector_version, now)?;
+            } else {
+                insert_work_and_binding(transaction, change, draft, projector_version, now)?;
             }
         }
         SourceChangeKind::Deactivated => {

@@ -360,10 +360,12 @@ async fn reactions_collect_every_page_and_page_two_failure_returns_no_batch() {
     let runtime = failed.store.source_runtime("slack-source").unwrap();
     assert_eq!(runtime.failure_count, 1);
     assert_eq!(runtime.last_success_at, Some(now()));
-    assert_eq!(
-        runtime.next_sync_at,
-        Some(now() + chrono::Duration::seconds(120))
-    );
+    let next_sync_at = runtime
+        .next_sync_at
+        .expect("provider failure schedules a retry");
+    let retry_delay = next_sync_at - now();
+    assert!(retry_delay >= chrono::Duration::seconds(120));
+    assert!(retry_delay <= chrono::Duration::seconds(144));
 }
 
 #[tokio::test]

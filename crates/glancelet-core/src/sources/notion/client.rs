@@ -533,7 +533,7 @@ pub(crate) fn plain_text(values: &[RawRichText], fallback: &str) -> String {
 }
 
 pub(crate) fn needs_configuration(field: &str, reason: &str) -> GlanceletError {
-    GlanceletError::Source(format!(
+    GlanceletError::ConfigurationRequired(format!(
         "Notion source needs configuration: the mapped {field} property {reason}."
     ))
 }
@@ -544,33 +544,33 @@ fn api_error(status: StatusCode, code: &str) -> GlanceletError {
             "Notion connection must be authorized again".into(),
         ),
         StatusCode::FORBIDDEN => {
-            GlanceletError::Source("Notion denied access to this operation".into())
+            GlanceletError::ConfigurationRequired("Notion denied access to this operation".into())
         }
-        StatusCode::NOT_FOUND => {
-            GlanceletError::Source("Notion data source is unavailable or inaccessible".into())
-        }
+        StatusCode::NOT_FOUND => GlanceletError::ConfigurationRequired(
+            "Notion data source is unavailable or inaccessible".into(),
+        ),
         StatusCode::BAD_REQUEST => {
-            GlanceletError::Source(format!("Notion rejected the request ({code})"))
+            GlanceletError::ConfigurationRequired(format!("Notion rejected the request ({code})"))
         }
-        StatusCode::CONFLICT => {
-            GlanceletError::Source("Notion could not complete the conflicting request".into())
-        }
+        StatusCode::CONFLICT => GlanceletError::ProviderFailure(
+            "Notion could not complete the conflicting request".into(),
+        ),
         status if status.is_server_error() => {
-            GlanceletError::Source("Notion is temporarily unavailable".into())
+            GlanceletError::ProviderFailure("Notion is temporarily unavailable".into())
         }
-        _ => GlanceletError::Source(format!("Notion API error ({code})")),
+        _ => GlanceletError::ProviderFailure(format!("Notion API error ({code})")),
     }
 }
 
 fn malformed(message: &str) -> GlanceletError {
-    GlanceletError::Source(message.into())
+    GlanceletError::ProviderFailure(message.into())
 }
 
 fn network_error(error: reqwest::Error) -> GlanceletError {
     if error.is_timeout() {
-        GlanceletError::Source("Notion request timed out".into())
+        GlanceletError::TransientNetwork("Notion request timed out".into())
     } else {
-        GlanceletError::Source("Notion network request failed".into())
+        GlanceletError::TransientNetwork("Notion network request failed".into())
     }
 }
 
