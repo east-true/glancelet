@@ -43,7 +43,7 @@ jobs:
         run: git checkout --detach "${{ github.event.pull_request.base.sha }}"
 
       - name: Scan base dependencies
-        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        uses: google/osv-scanner-action/osv-scanner-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
         continue-on-error: true
         with:
           scan-args: |-
@@ -56,7 +56,7 @@ jobs:
         run: git checkout --detach -f "${{ github.event.pull_request.head.sha }}"
 
       - name: Scan proposed dependencies
-        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        uses: google/osv-scanner-action/osv-scanner-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
         continue-on-error: true
         with:
           scan-args: |-
