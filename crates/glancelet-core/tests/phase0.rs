@@ -127,14 +127,14 @@ fn migration_baseline_handles_fresh_legacy_and_reopened_databases() {
             .unwrap()
             .schema_version()
             .unwrap(),
-        4
+        5
     );
     assert_eq!(
         SqliteWorkStore::open(&path)
             .unwrap()
             .schema_version()
             .unwrap(),
-        4
+        5
     );
 }
 
@@ -354,10 +354,15 @@ async fn failed_fetch_does_not_deactivate_and_delta_only_applies_explicit_mutati
             .failure_count,
         1
     );
-    assert_eq!(
-        harness.store.source_runtime("mirror").unwrap().next_sync_at,
-        Some(at(10, 1))
-    );
+    let next_sync_at = harness
+        .store
+        .source_runtime("mirror")
+        .unwrap()
+        .next_sync_at
+        .expect("failed sync schedules a retry");
+    let retry_delay = next_sync_at - harness.clock.now();
+    assert!(retry_delay >= chrono::Duration::seconds(60));
+    assert!(retry_delay <= chrono::Duration::seconds(72));
 
     harness.settings(
         "mirror",
