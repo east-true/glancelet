@@ -11,11 +11,6 @@ targets = [
 [advisories]
 unmaintained = "workspace"
 yanked = "warn"
-ignore = [
-  { id = "RUSTSEC-2024-0424", reason = "Current Tauri/tao Linux accessibility stack pulls atspi 0.19.0 transitively. Remove this exception when upstream replaces the affected dependency." },
-  { id = "RUSTSEC-2024-0429", reason = "Tauri 2.11.x currently depends on the GTK3 0.18 stack on Linux; upstream Tauri/tao still reports this transitive glib advisory. Revisit when Tauri moves off GTK3 0.18." },
-  { id = "RUSTSEC-2024-0436", reason = "Current Tauri/tao Linux clipboard stack pulls paste 1.0.15 transitively. Remove this exception when upstream replaces the affected dependency." },
-]
 
 [bans]
 multiple-versions = "warn"
@@ -47,6 +42,5 @@ exceptions = [
   { crate = "cssparser-macros", allow = ["MPL-2.0"] },
   { crate = "dtoa-short", allow = ["MPL-2.0"] },
   { crate = "option-ext", allow = ["MPL-2.0"] },
-  { crate = "ring", allow = ["Apache-2.0", "ISC"] },
   { crate = "selectors", allow = ["MPL-2.0"] },
 ]
