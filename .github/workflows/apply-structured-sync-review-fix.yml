@@ -25,7 +25,7 @@ jobs:
       - name: Apply self-review fixes
         run: |
           python .github/agent/fix_structured_sync_review.py
-          python -c 'from pathlib import Path; p=Path("apps/desktop/src/App.test.tsx"); t=p.read_text(); old="  fireEvent.click(screen.getByRole(\"button\", { name: \"Sync now\" }));\n\n  await screen.findByText(\"Captured after Slack sync\");\n"; new="  fireEvent.click(screen.getByRole(\"button\", { name: \"Sync now\" }));\n  fireEvent.click(screen.getByRole(\"button\", { name: \"Today\" }));\n\n  await screen.findByText(\"Captured after Slack sync\");\n"; assert t.count(old) == 1; p.write_text(t.replace(old, new, 1))'
+          python -c 'from pathlib import Path; p=Path("apps/desktop/src/App.test.tsx"); t=p.read_text(); old="  fireEvent.click(screen.getByRole(\"button\", { name: \"Sync now\" }));\n\n  await screen.findByText(\"Captured after Slack sync\");\n"; new="  fireEvent.click(screen.getByRole(\"button\", { name: \"Sync now\" }));\n  fireEvent.click(screen.getByRole(\"button\", { name: /^Today/ }));\n\n  await screen.findByText(\"Captured after Slack sync\");\n"; assert t.count(old) == 1; p.write_text(t.replace(old, new, 1))'
           rm .github/agent/fix_structured_sync_review.py
           rm .github/workflows/apply-structured-sync-review-fix.yml
           npm ci
