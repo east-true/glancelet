@@ -1,0 +1,50 @@
+name: Apply structured sync review fix
+
+on:
+  push:
+    branches:
+      - agent/structured-sync-report
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Apply self-review fixes
+        run: |
+          python .github/agent/fix_structured_sync_review.py
+          rm .github/agent/fix_structured_sync_review.py
+          rm .github/workflows/apply-structured-sync-review-fix.yml
+          npm ci
+          npx prettier --write \
+            apps/desktop/src/App.tsx \
+            apps/desktop/src/App.test.tsx \
+            apps/desktop/src/GoogleSettings.tsx
+          git diff --check
+
+      - name: Validate frontend
+        run: |
+          npm run format:check
+          npm run lint
+          npm test
+          npm run build
+
+      - name: Commit and push fixes
+        run: |
+          git add -A
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: refresh work after source sync"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
