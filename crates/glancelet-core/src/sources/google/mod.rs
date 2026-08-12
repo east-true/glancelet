@@ -7,6 +7,7 @@ pub use oauth::*;
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{DateTime, Days, LocalResult, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -468,7 +469,7 @@ fn map_active_event(
     });
     let encoded = serde_json::to_vec(&revision_material)
         .map_err(|_| GlanceletError::Source("cannot normalize Google Calendar event".into()))?;
-    let revision = format!("{:x}", Sha256::digest(encoded));
+    let revision = URL_SAFE_NO_PAD.encode(Sha256::digest(encoded));
     Ok(Some(SourceRecord {
         identity,
         title,
