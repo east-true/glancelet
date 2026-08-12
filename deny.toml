@@ -10,12 +10,15 @@ targets = [
 
 [advisories]
 unmaintained = "workspace"
-unsound = "all"
 yanked = "warn"
+ignore = [
+  { id = "RUSTSEC-2024-0429", reason = "Tauri 2.11.x currently depends on the GTK3 0.18 stack on Linux; upstream Tauri/tao still reports this transitive glib advisory. Revisit when Tauri moves off GTK3 0.18." },
+]
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
@@ -36,4 +39,11 @@ allow = [
   "Zlib",
   "CC0-1.0",
   "0BSD",
+]
+exceptions = [
+  { crate = "cssparser", allow = ["MPL-2.0"] },
+  { crate = "cssparser-macros", allow = ["MPL-2.0"] },
+  { crate = "dtoa-short", allow = ["MPL-2.0"] },
+  { crate = "option-ext", allow = ["MPL-2.0"] },
+  { crate = "selectors", allow = ["MPL-2.0"] },
 ]
