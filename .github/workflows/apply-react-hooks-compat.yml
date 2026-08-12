@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply:
-    if: github.actor != 'github-actions[bot]'
+    if: ${{ github.actor != 'github-actions[bot]' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,55 +27,61 @@ jobs:
 
           path = Path("apps/desktop/src/App.tsx")
           text = path.read_text()
-          old_effect = '''    const timer = window.setInterval(
-      () => void refresh(false),
-      DASHBOARD_TIME_REFRESH_MS,
-    );
-    void refresh();
-    return () => {
-      disposed = true;
-      unlisten?.();
-      window.clearInterval(timer);
-    };
-'''
-          new_effect = '''    const timer = window.setInterval(
-      () => void refresh(false),
-      DASHBOARD_TIME_REFRESH_MS,
-    );
-    const initialRefresh = window.setTimeout(() => void refresh(), 0);
-    return () => {
-      disposed = true;
-      unlisten?.();
-      window.clearTimeout(initialRefresh);
-      window.clearInterval(timer);
-    };
-'''
+
+          old_effect = (
+              "    const timer = window.setInterval(\n"
+              "      () => void refresh(false),\n"
+              "      DASHBOARD_TIME_REFRESH_MS,\n"
+              "    );\n"
+              "    void refresh();\n"
+              "    return () => {\n"
+              "      disposed = true;\n"
+              "      unlisten?.();\n"
+              "      window.clearInterval(timer);\n"
+              "    };\n"
+          )
+          new_effect = (
+              "    const timer = window.setInterval(\n"
+              "      () => void refresh(false),\n"
+              "      DASHBOARD_TIME_REFRESH_MS,\n"
+              "    );\n"
+              "    const initialRefresh = window.setTimeout(() => void refresh(), 0);\n"
+              "    return () => {\n"
+              "      disposed = true;\n"
+              "      unlisten?.();\n"
+              "      window.clearTimeout(initialRefresh);\n"
+              "      window.clearInterval(timer);\n"
+              "    };\n"
+          )
           if old_effect not in text:
               raise SystemExit("initial dashboard refresh target not found")
           text = text.replace(old_effect, new_effect, 1)
-          old_value = '''  const today = localDateString(new Date());
-  const oneHourFromNow = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-'''
-          new_value = '''  const today = localDateString(new Date());
-'''
+
+          old_value = (
+              "  const today = localDateString(new Date());\n"
+              "  const oneHourFromNow = new Date(Date.now() + 60 * 60 * 1000).toISOString();\n"
+          )
           if old_value not in text:
               raise SystemExit("snooze render-time target not found")
-          text = text.replace(old_value, new_value, 1)
-          old_handler = '''          <button
-            onClick={() =>
-              void run(work.id, { type: "snooze", until: oneHourFromNow })
-            }
-          >
-'''
-          new_handler = '''          <button
-            onClick={() => {
-              const until = new Date(
-                Date.now() + 60 * 60 * 1000,
-              ).toISOString();
-              void run(work.id, { type: "snooze", until });
-            }}
-          >
-'''
+          text = text.replace(old_value, "  const today = localDateString(new Date());\n", 1)
+
+          old_handler = (
+              "          <button\n"
+              "            onClick={() =>\n"
+              "              void run(work.id, { type: \"snooze\", until: oneHourFromNow })\n"
+              "            }\n"
+              "          >\n"
+          )
+          new_handler = (
+              "          <button\n"
+              "            onClick={() => {\n"
+              "              const until = new Date(\n"
+              "                Date.now() + 60 * 60 * 1000,\n"
+              "              ).toISOString();\n"
+              "              void run(work.id, { type: \"snooze\", until });\n"
+              "            }}\n"
+              "          >\n"
+          )
           if old_handler not in text:
               raise SystemExit("snooze click handler target not found")
           path.write_text(text.replace(old_handler, new_handler, 1))
