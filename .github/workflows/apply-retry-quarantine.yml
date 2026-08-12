@@ -1,4 +1,4 @@
-name: Inspect retry hardening patch mismatch
+name: Inspect provider classification patch payload
 
 on:
   push:
@@ -14,9 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 4
+          fetch-depth: 5
 
-      - name: Recover patch script and print Slack replacement
+      - name: Recover and inspect patch script
         run: |
           git show d5ffced6ae66cc3d1764c6a935762d1b0fe7dbfa:.github/workflows/apply-retry-quarantine.yml \
             | awk '/^H4s/{capture=1} /^PAYLOAD$/{capture=0} capture' \
@@ -26,5 +26,8 @@ jobs:
           gzip --decompress --stdout /tmp/apply_retry_quarantine.py.gz \
             > /tmp/apply_retry_quarantine.py || true
           python -m py_compile /tmp/apply_retry_quarantine.py
-          grep -n -B 45 -A 20 "Slack malformed/network classification" \
-            /tmp/apply_retry_quarantine.py
+          echo '--- provider patch range ---'
+          sed -n '700,980p' /tmp/apply_retry_quarantine.py
+          echo '--- suspicious blank type annotations ---'
+          grep -nE '[A-Za-z_]+:[[:space:]]{4,}[),]' /tmp/apply_retry_quarantine.py || true
+          grep -nE '[A-Za-z_]+[[:space:]]{5,}\)' /tmp/apply_retry_quarantine.py || true
