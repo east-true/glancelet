@@ -1,4 +1,4 @@
-name: Apply retry and projection quarantine hardening
+name: Inspect retry hardening patch mismatch
 
 on:
   push:
@@ -6,82 +6,25 @@ on:
       - agent/retry-backoff-projection-quarantine
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  apply:
+  inspect:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 3
+          fetch-depth: 4
 
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          components: rustfmt, clippy
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Install Tauri Linux prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev \
-            pkg-config \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libxdo-dev \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev
-
-      - name: Recover and apply implementation
+      - name: Recover patch script and print Slack replacement
         run: |
           git show d5ffced6ae66cc3d1764c6a935762d1b0fe7dbfa:.github/workflows/apply-retry-quarantine.yml \
             | awk '/^H4s/{capture=1} /^PAYLOAD$/{capture=0} capture' \
             > /tmp/apply_retry_quarantine.py.gz.b64
-          test -s /tmp/apply_retry_quarantine.py.gz.b64
           base64 --decode /tmp/apply_retry_quarantine.py.gz.b64 \
             > /tmp/apply_retry_quarantine.py.gz
-          set +e
           gzip --decompress --stdout /tmp/apply_retry_quarantine.py.gz \
-            > /tmp/apply_retry_quarantine.py
-          gzip_status=$?
-          set -e
-          test -s /tmp/apply_retry_quarantine.py
+            > /tmp/apply_retry_quarantine.py || true
           python -m py_compile /tmp/apply_retry_quarantine.py
-          if [[ "$gzip_status" -ne 0 ]]; then
-            echo "gzip trailer mismatch detected; recovered Python source passed syntax validation"
-          fi
-          python /tmp/apply_retry_quarantine.py
-          rm .github/workflows/apply-retry-quarantine.yml
-          cargo fmt --all
-          git diff --check
-
-      - name: Validate Rust
-        run: |
-          cargo check -p glancelet-desktop --all-features
-          cargo clippy -p glancelet-core --all-targets --all-features -- -D warnings
-          cargo clippy -p glancelet-desktop --all-targets --all-features -- -D warnings
-          cargo test -p glancelet-core
-
-      - name: Validate frontend
-        run: |
-          npm ci
-          npm run format:check
-          npm run lint
-          npm test
-          npm run build
-
-      - name: Commit and push implementation
-        run: |
-          git add -A
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "fix: harden retries and quarantine terminal projections"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          grep -n -B 45 -A 20 "Slack malformed/network classification" \
+            /tmp/apply_retry_quarantine.py
