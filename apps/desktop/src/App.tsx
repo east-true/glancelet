@@ -63,10 +63,11 @@ export default function App() {
       () => void refresh(false),
       DASHBOARD_TIME_REFRESH_MS,
     );
-    void refresh();
+    const initialRefresh = window.setTimeout(() => void refresh(), 0);
     return () => {
       disposed = true;
       unlisten?.();
+      window.clearTimeout(initialRefresh);
       window.clearInterval(timer);
     };
   }, [refresh]);
@@ -732,7 +733,6 @@ function WorkCard({
   const open = () =>
     supports("open_source") && void glanceletApi.openSource(work.id);
   const today = localDateString(new Date());
-  const oneHourFromNow = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
   return (
     <article className={`work-card kind-${work.kind}`}>
@@ -783,9 +783,10 @@ function WorkCard({
         )}
         {supports("snooze") && (
           <button
-            onClick={() =>
-              void run(work.id, { type: "snooze", until: oneHourFromNow })
-            }
+            onClick={() => {
+              const until = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+              void run(work.id, { type: "snooze", until });
+            }}
           >
             Snooze
           </button>
