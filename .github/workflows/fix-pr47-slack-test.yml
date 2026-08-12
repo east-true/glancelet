@@ -25,6 +25,7 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
 
           path = Path('crates/glancelet-core/tests/slack.rs')
           text = path.read_text()
@@ -34,19 +35,21 @@ jobs:
           function_end = text.index('\n#[tokio::test]\n', function_start)
           test = text[function_start:function_end]
 
-          old = '''    assert_eq!(
-              runtime.next_sync_at,
-              Some(now() + chrono::Duration::seconds(120))
-          );'''
-          new = '''    let next_sync_at = runtime
-              .next_sync_at
-              .expect("provider failure schedules a retry");
-          let retry_delay = next_sync_at - now();
-          assert!(retry_delay >= chrono::Duration::seconds(120));
-          assert!(retry_delay <= chrono::Duration::seconds(144));'''
-          if test.count(old) != 1:
+          pattern = re.compile(
+              r'assert_eq!\(\s*runtime\.next_sync_at,\s*'
+              r'Some\(now\(\) \+ chrono::Duration::seconds\(120\)\)\s*\);'
+          )
+          replacement = '\n'.join([
+              'let next_sync_at = runtime',
+              '    .next_sync_at',
+              '    .expect("provider failure schedules a retry");',
+              'let retry_delay = next_sync_at - now();',
+              'assert!(retry_delay >= chrono::Duration::seconds(120));',
+              'assert!(retry_delay <= chrono::Duration::seconds(144));',
+          ])
+          test, count = pattern.subn(replacement, test, count=1)
+          if count != 1:
               raise SystemExit('stale Slack retry assertion target not found exactly once')
-          test = test.replace(old, new)
           text = text[:function_start] + test + text[function_end:]
           path.write_text(text)
           PY
