@@ -1,0 +1,53 @@
+name: Fix runtime partial move
+
+on:
+  push:
+    branches:
+      - agent/harden-core-causality
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Reorder runtime view fields before moving last_error
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("apps/desktop/src-tauri/src/lib.rs")
+          text = path.read_text()
+          old = """                        last_sync: runtime.last_success_at,
+                        last_error: runtime.last_error,
+                        authentication_required: runtime.authentication_required(),
+"""
+          new = """                        last_sync: runtime.last_success_at,
+                        authentication_required: runtime.authentication_required(),
+                        last_error: runtime.last_error,
+"""
+          occurrences = text.count(old)
+          if occurrences != 2:
+              raise SystemExit(f"expected 2 runtime view mappings, found {occurrences}")
+          path.write_text(text.replace(old, new))
+          PY
+          cargo fmt --all
+          rm .github/workflows/fix-runtime-partial-move.yml
+
+      - name: Commit and push fix
+        run: |
+          git add -A
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: avoid partial move in source runtime views"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
