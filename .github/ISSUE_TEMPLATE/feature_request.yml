@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose an improvement to Glancelet
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: Please describe the user problem first. For substantial architecture changes, explain how the proposal preserves local-first behavior and keeps the original service as the source of truth.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or need
+      description: What user problem are you trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: input
+    id: source
+    attributes:
+      label: Related source or integration
+      placeholder: Slack, Notion, Google Calendar, desktop HUD, core
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Privacy and local-first considerations
+      description: Note any credential, persistence, telemetry, or provider-data implications.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
