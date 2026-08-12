@@ -615,6 +615,7 @@ async fn mirror_updates_preserve_local_state_and_reactivation_resets_it() {
 async fn optional_filters_are_omitted_and_rate_limit_controls_next_sync() {
     let mut unfiltered = settings();
     unfiltered.properties.assignee = None;
+    unfiltered.only_assigned_to_me = false;
     unfiltered.properties.status = None;
     unfiltered.properties.due = None;
     unfiltered.active_status_ids.clear();

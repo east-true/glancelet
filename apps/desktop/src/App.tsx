@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useState } from "react";
 import {
   glanceletApi,
@@ -20,6 +21,7 @@ import { localDateString } from "./local-time";
 import "./styles.css";
 
 const emptyDashboard: WorkDashboard = { today: [], inbox: [] };
+const DASHBOARD_TIME_REFRESH_MS = 60_000;
 type Tab = keyof WorkDashboard | "settings";
 
 export default function App() {
@@ -37,9 +39,9 @@ export default function App() {
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (clearError = true) => {
     try {
-      setError(null);
+      if (clearError) setError(null);
       setDashboard(await glanceletApi.dashboard());
     } catch (reason) {
       setError(String(reason));
@@ -49,7 +51,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen("glancelet://work-changed", () => void refresh(false)).then(
+      (dispose) => {
+        if (disposed) dispose();
+        else unlisten = dispose;
+      },
+    );
+    const timer = window.setInterval(
+      () => void refresh(false),
+      DASHBOARD_TIME_REFRESH_MS,
+    );
     void refresh();
+    return () => {
+      disposed = true;
+      unlisten?.();
+      window.clearInterval(timer);
+    };
   }, [refresh]);
 
   async function sync() {
@@ -326,7 +345,7 @@ function NotionConnectionCard({
         status: property(statusId),
         due: property(dueId),
       },
-      onlyAssignedToMe: onlyMe,
+      onlyAssignedToMe: assigneeId ? onlyMe : false,
       activeStatusIds: statusId ? activeStatusIds : [],
     };
   }
@@ -346,11 +365,11 @@ function NotionConnectionCard({
         value.properties.find((candidate) => candidate.type === "title")?.id ??
         "",
     );
-    setAssigneeId(
+    const nextAssigneeId =
       existing?.settings.properties.assignee?.id ??
-        value.properties.find((candidate) => candidate.type === "people")?.id ??
-        "",
-    );
+      value.properties.find((candidate) => candidate.type === "people")?.id ??
+      "";
+    setAssigneeId(nextAssigneeId);
     setStatusId(
       existing?.settings.properties.status?.id ?? defaultStatus?.id ?? "",
     );
@@ -359,7 +378,9 @@ function NotionConnectionCard({
         value.properties.find((candidate) => candidate.type === "date")?.id ??
         "",
     );
-    setOnlyMe(existing?.settings.onlyAssignedToMe ?? true);
+    setOnlyMe(
+      nextAssigneeId ? (existing?.settings.onlyAssignedToMe ?? true) : false,
+    );
     setActiveStatusIds(
       existing?.settings.activeStatusIds ??
         defaultStatus?.status?.groups
@@ -523,7 +544,10 @@ function NotionConnectionCard({
                   (candidate) => candidate.type === "people",
                 )}
                 value={assigneeId}
-                onChange={setAssigneeId}
+                onChange={(value) => {
+                  setAssigneeId(value);
+                  if (!value) setOnlyMe(false);
+                }}
               />
               <PropertySelect
                 label="Status"

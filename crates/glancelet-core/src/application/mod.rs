@@ -1,10 +1,12 @@
 mod clock;
+mod connection;
 mod navigation;
 mod secrets;
 mod sync;
 mod work;
 
 pub use clock::*;
+pub use connection::*;
 pub use navigation::*;
 pub use secrets::*;
 pub use sync::*;
@@ -15,7 +17,8 @@ use serde_json::Value;
 
 use crate::{
     domain::{
-        SourceBatch, SourceChange, WorkBinding, WorkDraft, WorkEntry, WorkPlanning, WorkProgress,
+        ProviderId, SourceBatch, SourceChange, WorkBinding, WorkDraft, WorkEntry, WorkPlanning,
+        WorkProgress,
     },
     extension::{Connection, SourceConfig},
     Result,
@@ -64,6 +67,7 @@ pub enum WorkMutation {
 pub trait WorkStore: Send + Sync {
     fn put_connection(&self, connection: &Connection) -> Result<()>;
     fn connections(&self) -> Result<Vec<Connection>>;
+    fn disconnect_connection(&self, connection_id: &str, provider_id: &ProviderId) -> Result<()>;
     fn put_source_config(&self, config: &SourceConfig) -> Result<()>;
     fn source_configs(&self) -> Result<Vec<SourceConfig>>;
     fn source_config(&self, id: &str) -> Result<SourceConfig>;
@@ -83,7 +87,20 @@ pub trait WorkStore: Send + Sync {
         batch: &SourceBatch,
         now: DateTime<Utc>,
     ) -> Result<usize>;
-    fn pending_source_changes(&self, limit: usize) -> Result<Vec<SourceChange>>;
+    fn pending_source_changes_at(
+        &self,
+        limit: usize,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<SourceChange>>;
+    fn pending_source_changes(&self, limit: usize) -> Result<Vec<SourceChange>> {
+        self.pending_source_changes_at(limit, Utc::now())
+    }
+    fn record_projection_failure(
+        &self,
+        change_id: i64,
+        next_retry_at: DateTime<Utc>,
+        error: &str,
+    ) -> Result<()>;
     fn apply_projection(
         &self,
         change: &SourceChange,

@@ -132,6 +132,11 @@ pub fn validate_settings(schema: &NotionDataSource, settings: &NotionSourceSetti
         ));
     }
     validate_mapping(schema, &settings.properties.title, "title", "Title")?;
+    if settings.only_assigned_to_me && settings.properties.assignee.is_none() {
+        return Err(GlanceletError::InvalidOperation(
+            "assigned-to-me filtering requires a mapped Notion assignee property".into(),
+        ));
+    }
     if let Some(mapping) = settings.properties.assignee.as_ref() {
         validate_mapping(schema, mapping, "people", "Assignee")?;
     }
