@@ -1,0 +1,89 @@
+# These exceptions cover transitive dependencies in Tauri's Linux GTK3 stack.
+# Keep them scoped to individual advisory IDs so newly reported vulnerabilities
+# still fail the weekly scan. Revisit the GTK3 set when Tauri's Linux backend
+# can move off the archived gtk3-rs bindings.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0411"
+ignoreUntil = 2027-02-13
+reason = "Transitive Tauri Linux GTK3 binding; no patched gtk3-rs release is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0412"
+ignoreUntil = 2027-02-13
+reason = "Transitive Tauri Linux GTK3 binding; no patched gtk3-rs release is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0413"
+ignoreUntil = 2027-02-13
+reason = "Transitive Tauri Linux GTK3 binding; no patched gtk3-rs release is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0414"
+ignoreUntil = 2027-02-13
+reason = "Transitive Tauri Linux GTK3 binding; no patched gtk3-rs release is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0415"
+ignoreUntil = 2027-02-13
+reason = "Transitive Tauri Linux GTK3 binding; no patched gtk3-rs release is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0416"
+ignoreUntil = 2027-02-13
+reason = "Transitive Tauri Linux GTK3 binding; no patched gtk3-rs release is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0417"
+ignoreUntil = 2027-02-13
+reason = "Transitive Tauri Linux GTK3 binding; no patched gtk3-rs release is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0418"
+ignoreUntil = 2027-02-13
+reason = "Transitive Tauri Linux GTK3 binding; no patched gtk3-rs release is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0419"
+ignoreUntil = 2027-02-13
+reason = "Transitive Tauri Linux GTK3 binding; no patched gtk3-rs release is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0420"
+ignoreUntil = 2027-02-13
+reason = "Transitive Tauri Linux GTK3 binding; no patched gtk3-rs release is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0429"
+ignoreUntil = 2026-11-13
+reason = "Tauri pins glib 0.18; Glancelet does not use the affected VariantStrIter API directly."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+ignoreUntil = 2027-02-13
+reason = "Unmaintained transitive proc-macro dependency; no patched release is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0075"
+ignoreUntil = 2027-02-13
+reason = "Unmaintained transitive Unicode data dependency; no patched release is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0080"
+ignoreUntil = 2027-02-13
+reason = "Unmaintained transitive Unicode data dependency; no patched release is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0081"
+ignoreUntil = 2027-02-13
+reason = "Unmaintained transitive Unicode data dependency; no patched release is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0098"
+ignoreUntil = 2027-02-13
+reason = "Unmaintained transitive Unicode data dependency; no patched release is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0100"
+ignoreUntil = 2027-02-13
+reason = "Unmaintained transitive Unicode data dependency; no patched release is available."
