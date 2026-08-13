@@ -83,7 +83,7 @@ impl SyncCoordinator {
             Ok(batch) => batch,
             Err(error) => {
                 let now = self.clock.now();
-                let kind = failure_kind(&error);
+                let kind = SourceFailureKind::from(&error);
                 let next_retry_at = retry_at(
                     source_config_id,
                     config.expected_sync_interval_seconds,
@@ -140,17 +140,6 @@ impl SyncCoordinator {
             }
         }
         results
-    }
-}
-
-fn failure_kind(error: &GlanceletError) -> SourceFailureKind {
-    match error {
-        GlanceletError::AuthenticationRequired(_) => SourceFailureKind::AuthenticationRequired,
-        GlanceletError::ConfigurationRequired(_) => SourceFailureKind::ConfigurationRequired,
-        GlanceletError::RateLimited { .. } => SourceFailureKind::RateLimited,
-        GlanceletError::TransientNetwork(_) => SourceFailureKind::TransientNetwork,
-        GlanceletError::ProviderFailure(_) => SourceFailureKind::ProviderFailure,
-        _ => SourceFailureKind::Other,
     }
 }
 

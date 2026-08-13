@@ -114,7 +114,7 @@ fn migration_baseline_handles_fresh_legacy_and_reopened_databases() {
     let path = directory.path().join("migration.db");
     {
         let store = SqliteWorkStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert_eq!(store.schema_version().unwrap(), 6);
     }
     {
         let connection = rusqlite::Connection::open(&path).unwrap();
@@ -127,14 +127,32 @@ fn migration_baseline_handles_fresh_legacy_and_reopened_databases() {
             .unwrap()
             .schema_version()
             .unwrap(),
-        5
+        6
     );
     assert_eq!(
         SqliteWorkStore::open(&path)
             .unwrap()
             .schema_version()
             .unwrap(),
-        5
+        6
+    );
+
+    // `006` drops the two projection indexes that `EXPLAIN QUERY PLAN` showed the
+    // planner never chose; the pending-projection queries are served by
+    // `source_changes_pending` and `source_changes_entity_pending`.
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let mut statement = connection
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='source_changes'")
+        .unwrap();
+    let mut indexes = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    indexes.sort();
+    assert_eq!(
+        indexes,
+        vec!["source_changes_entity_pending", "source_changes_pending"]
     );
 }
 
@@ -181,7 +199,7 @@ fn source_lifecycle_migration_preserves_history_and_moves_legacy_remove_marker()
     }
     let store = SqliteWorkStore::open(&path).unwrap();
     let config = store.source_config("source").unwrap();
-    assert_eq!(store.schema_version().unwrap(), 5);
+    assert_eq!(store.schema_version().unwrap(), 6);
     assert!(!config.enabled);
     assert!(config.removed_at.is_some());
     assert!(config.settings.get("_removed").is_none());
