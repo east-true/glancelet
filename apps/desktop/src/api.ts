@@ -221,6 +221,38 @@ export interface GithubConnection {
   sources: GithubSource[];
 }
 
+export interface GitlabDeviceAuthorization {
+  sessionId: string;
+  userCode: string;
+  verificationUri: string;
+  verificationUriComplete: string | null;
+  expiresAt: string;
+  retryAfterSeconds: number;
+}
+
+export interface GitlabDevicePoll {
+  status: "pending" | "authorized";
+  retryAfterSeconds: number | null;
+}
+
+export interface GitlabSource {
+  sourceId: string;
+  name: string;
+  enabled: boolean;
+  lastSync: string | null;
+  lastError: string | null;
+}
+
+export interface GitlabConnection {
+  connectionId: string;
+  username: string;
+  instanceOrigin: string;
+  instanceLabel: string;
+  authMode: "oauth" | "pat";
+  status: "connected" | "reauth_required" | "disconnected";
+  source: GitlabSource | null;
+}
+
 export type WorkCommand =
   | { type: "plan"; date: string }
   | { type: "move_to_inbox" }
@@ -340,6 +372,23 @@ export const glanceletApi = {
     invoke<void>("remove_github_source", { sourceId }),
   disconnectGithub: (connectionId: string) =>
     invoke<void>("disconnect_github", { connectionId }),
+  gitlabConnections: () => invoke<GitlabConnection[]>("gitlab_connections"),
+  startGitlabConnection: () =>
+    invoke<GitlabDeviceAuthorization>("start_gitlab_connection"),
+  pollGitlabConnection: (sessionId: string) =>
+    invoke<GitlabDevicePoll>("poll_gitlab_connection", { sessionId }),
+  cancelGitlabConnection: (sessionId: string) =>
+    invoke<void>("cancel_gitlab_connection", { sessionId }),
+  connectGitlabPat: (instanceUrl: string, token: string) =>
+    invoke<void>("connect_gitlab_pat", { instanceUrl, token }),
+  saveGitlabTodosSource: (connectionId: string) =>
+    invoke<string>("save_gitlab_todos_source", { connectionId }),
+  updateGitlabSource: (sourceId: string, enabled: boolean) =>
+    invoke<void>("update_gitlab_source", { sourceId, enabled }),
+  removeGitlabSource: (sourceId: string) =>
+    invoke<void>("remove_gitlab_source", { sourceId }),
+  disconnectGitlab: (connectionId: string) =>
+    invoke<void>("disconnect_gitlab", { connectionId }),
   command: (workId: string, command: WorkCommand) =>
     invoke<void>("run_work_command", { workId, command }),
   openSource: (workId: string) => invoke<void>("open_source", { workId }),

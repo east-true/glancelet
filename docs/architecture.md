@@ -22,6 +22,8 @@ Google Calendar is the first real delta source. Its bounded daily reconciliation
 
 GitHub was implemented after the Core v0 freeze without reopening it. One GitHub Connection owns two global SourceConfigs (Review Requests and Assigned Issues) plus independent repository-scoped Workflow Failure SourceConfigs. All return authoritative `FullSnapshot` batches. Reviews and issues project existing Mirror Actions, while a repository's latest completed failing workflow projects a Mirror Attention keyed by workflow ID. GitHub App Device Flow, user-token refresh, installation-aware repository discovery, Search completeness checks, and Actions DTOs remain inside `sources::github`; no GitHub branch or table enters Core.
 
+GitLab was also implemented on the frozen contracts. GitLab.com uses secretless Device Authorization Grant and self-managed instances use a user-provided `read_api` PAT. Both create one `gitlab.todos` SourceConfig per Connection and return an authoritative `FullSnapshot` of pending To-Dos as Mirror Actions with no progress authority. Instance normalization, credential refresh, typed DTOs, same-origin pagination, and target navigation remain inside `sources::gitlab`; no GitLab branch, batch kind, table, or column enters Core. Connection identity is scoped by normalized instance origin plus GitLab user ID, so equal numeric IDs on different installations cannot collide.
+
 Core contains no provider-ID behavior branches, and SQLite contains no provider-specific tables or columns. Provider configuration and minimal normalized metadata remain in the existing generic JSON fields.
 
 Event ranges use provider-neutral half-open `[start, end)` semantics. This represents Google all-day exclusive ends and timed/multi-day events without provider-specific domain fields, while preserving Notion date-only values and Google IANA timezone metadata in `TemporalValue`.
@@ -41,6 +43,7 @@ Implemented on the frozen contracts:
 - GitHub Review Requests — Mirror FullSnapshot Actions, no progress
 - GitHub Assigned Issues — Mirror FullSnapshot Actions, no progress
 - GitHub Workflow Failures — repository-scoped Mirror FullSnapshot Attentions, no progress
+- GitLab To-Dos — instance-scoped Mirror FullSnapshot Actions, no progress
 
 Phase 3.5 integration tests cover source lifecycle restoration, multi-provider failure isolation and single-flight, restart persistence, credential separation, Google declined transitions, and unspecified Event ends. All current Core boundaries are stable for these providers.
 

@@ -27,6 +27,12 @@ use glancelet_core::{
         REVIEW_REQUESTS_SOURCE_TYPE as GITHUB_REVIEW_REQUESTS_SOURCE_TYPE,
         WORKFLOW_FAILURES_SOURCE_TYPE as GITHUB_WORKFLOW_FAILURES_SOURCE_TYPE,
     },
+    sources::gitlab::{
+        self, GitlabApiClient, GitlabAuthorization, GitlabCredential, GitlabDeviceAuthorization,
+        GitlabDeviceFlowService, GitlabDevicePollResult, GitlabInstance, GitlabTodoSettings,
+        GitlabTokenProvider, DEFAULT_SYNC_INTERVAL_SECONDS as GITLAB_SYNC_INTERVAL_SECONDS,
+        GITLAB_COM_ORIGIN, PROVIDER_ID as GITLAB_PROVIDER_ID, SOURCE_TYPE as GITLAB_SOURCE_TYPE,
+    },
     sources::google::{
         self, GoogleApiClient, GoogleCalendar, GoogleCalendarSettings, GoogleOAuthService,
         GoogleTokenProvider, DEFAULT_SYNC_INTERVAL_SECONDS as GOOGLE_SYNC_INTERVAL_SECONDS,
@@ -81,6 +87,10 @@ struct AppServices {
     github_tokens: Arc<GithubTokenProvider>,
     github_device_flow: GithubDeviceFlowService,
     github_client_id: String,
+    gitlab_client: Arc<GitlabApiClient>,
+    gitlab_tokens: Arc<GitlabTokenProvider>,
+    gitlab_device_flow: GitlabDeviceFlowService,
+    gitlab_client_id: String,
     stopping: Arc<AtomicBool>,
 }
 
@@ -204,6 +214,22 @@ impl AppServices {
                 Arc::clone(&github_tokens),
             ))
             .map_err(|error| error.to_string())?;
+        let gitlab_client_id = env::var("GLANCELET_GITLAB_CLIENT_ID").unwrap_or_default();
+        let gitlab_client = Arc::new(
+            GitlabApiClient::production(Arc::clone(&clock)).map_err(|error| error.to_string())?,
+        );
+        let gitlab_tokens = Arc::new(GitlabTokenProvider::new(
+            gitlab_client_id.clone(),
+            Arc::clone(&gitlab_client),
+            Arc::clone(&secrets),
+            Arc::clone(&clock),
+        ));
+        registry
+            .register(gitlab::registration(
+                Arc::clone(&gitlab_client),
+                Arc::clone(&gitlab_tokens),
+            ))
+            .map_err(|error| error.to_string())?;
         let registry = Arc::new(registry);
         #[cfg(feature = "demo-sources")]
         seed_fake_sources(&store)?;
@@ -252,6 +278,13 @@ impl AppServices {
             github_client,
             github_tokens,
             github_client_id,
+            gitlab_device_flow: GitlabDeviceFlowService::new(
+                Arc::clone(&gitlab_client),
+                Arc::clone(&clock),
+            ),
+            gitlab_client,
+            gitlab_tokens,
+            gitlab_client_id,
             stopping: Arc::new(AtomicBool::new(false)),
         }))
     }
@@ -465,6 +498,37 @@ struct GithubSourceView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GithubDevicePollView {
+    status: &'static str,
+    retry_after_seconds: Option<i64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitlabConnectionView {
+    connection_id: String,
+    username: String,
+    instance_origin: String,
+    instance_label: String,
+    auth_mode: String,
+    status: String,
+    source: Option<GitlabSourceView>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitlabSourceView {
+    source_id: String,
+    name: String,
+    enabled: bool,
+    last_sync: Option<DateTime<Utc>>,
+    last_error: Option<String>,
+    #[serde(skip_serializing)]
+    authentication_required: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitlabDevicePollView {
     status: &'static str,
     retry_after_seconds: Option<i64>,
 }
@@ -1498,6 +1562,278 @@ fn is_github_source_type(source_type: &str) -> bool {
 }
 
 #[tauri::command]
+fn gitlab_connections(
+    services: State<'_, Arc<AppServices>>,
+) -> Result<Vec<GitlabConnectionView>, String> {
+    let configs = services
+        .store
+        .source_configs()
+        .map_err(|error| error.to_string())?;
+    services
+        .store
+        .connections()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|connection| connection.provider_id.0 == GITLAB_PROVIDER_ID)
+        .map(|connection| {
+            let source = configs
+                .iter()
+                .find(|config| {
+                    gitlab::matches_source_config(config, &connection.id)
+                        && config.removed_at.is_none()
+                })
+                .map(|config| {
+                    let runtime = services
+                        .store
+                        .source_runtime(&config.id)
+                        .map_err(|error| error.to_string())?;
+                    let authentication_required = runtime.authentication_required();
+                    Ok::<GitlabSourceView, String>(GitlabSourceView {
+                        source_id: config.id.clone(),
+                        name: config.display_name.clone(),
+                        enabled: config.enabled,
+                        last_sync: runtime.last_success_at,
+                        last_error: runtime.last_error,
+                        authentication_required,
+                    })
+                })
+                .transpose()?;
+            let authentication_required = source
+                .as_ref()
+                .is_some_and(|source| source.authentication_required);
+            let status = connection_status(&connection, authentication_required);
+            let instance_origin = connection.config["instance_origin"]
+                .as_str()
+                .unwrap_or(GITLAB_COM_ORIGIN)
+                .to_owned();
+            let instance_label = GitlabInstance::parse(&instance_origin)
+                .map(|instance| instance.host_label())
+                .unwrap_or(instance_origin.clone());
+            Ok(GitlabConnectionView {
+                connection_id: connection.id,
+                username: connection.config["username"]
+                    .as_str()
+                    .unwrap_or("GitLab user")
+                    .to_owned(),
+                instance_origin,
+                instance_label,
+                auth_mode: connection.config["auth_mode"]
+                    .as_str()
+                    .unwrap_or("oauth")
+                    .to_owned(),
+                status: status.into(),
+                source,
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
+async fn start_gitlab_connection(
+    app: tauri::AppHandle,
+    services: State<'_, Arc<AppServices>>,
+) -> Result<GitlabDeviceAuthorization, String> {
+    let authorization = services
+        .gitlab_device_flow
+        .begin(GitlabInstance::gitlab_com(), &services.gitlab_client_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let browser_url = authorization
+        .verification_uri_complete
+        .as_deref()
+        .unwrap_or(&authorization.verification_uri);
+    if let Err(error) = app.opener().open_url(browser_url, None::<&str>) {
+        services
+            .gitlab_device_flow
+            .cancel(&authorization.session_id);
+        return Err(error.to_string());
+    }
+    Ok(authorization)
+}
+
+#[tauri::command]
+async fn poll_gitlab_connection(
+    services: State<'_, Arc<AppServices>>,
+    session_id: String,
+) -> Result<GitlabDevicePollView, String> {
+    match services
+        .gitlab_device_flow
+        .poll(&session_id)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        GitlabDevicePollResult::Pending {
+            retry_after_seconds,
+        } => Ok(GitlabDevicePollView {
+            status: "pending",
+            retry_after_seconds: Some(retry_after_seconds),
+        }),
+        GitlabDevicePollResult::Authorized(authorization) => {
+            persist_gitlab_connection(&services, authorization)
+                .map_err(|error| error.to_string())?;
+            Ok(GitlabDevicePollView {
+                status: "authorized",
+                retry_after_seconds: None,
+            })
+        }
+    }
+}
+
+#[tauri::command]
+fn cancel_gitlab_connection(services: State<'_, Arc<AppServices>>, session_id: String) {
+    services.gitlab_device_flow.cancel(&session_id);
+}
+
+#[tauri::command]
+async fn connect_gitlab_pat(
+    services: State<'_, Arc<AppServices>>,
+    instance_url: String,
+    token: String,
+) -> Result<(), String> {
+    let instance = GitlabInstance::parse(&instance_url).map_err(|error| error.to_string())?;
+    if token.trim().is_empty() {
+        return Err("GitLab Personal Access Token is required".into());
+    }
+    let credential = GitlabCredential::personal_access_token(token);
+    let identity = services
+        .gitlab_client
+        .authenticated_user(&instance, &credential.auth())
+        .await
+        .map_err(|error| error.to_string())?;
+    // `/user` accepts weaker scopes on some GitLab versions. Reading the actual
+    // Phase 5 resource proves this PAT has the required read_api capability
+    // before it is committed to the SecretStore.
+    services
+        .gitlab_client
+        .todos(&instance, &credential.auth())
+        .await
+        .map_err(|error| error.to_string())?;
+    persist_gitlab_connection(
+        &services,
+        GitlabAuthorization {
+            credential,
+            identity,
+            instance,
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_gitlab_todos_source(
+    services: State<'_, Arc<AppServices>>,
+    connection_id: String,
+) -> Result<String, String> {
+    let connection = ensure_gitlab_connection(&services, &connection_id)?;
+    let instance_origin = connection.config["instance_origin"]
+        .as_str()
+        .ok_or_else(|| "GitLab connection omitted instance origin".to_owned())?;
+    let instance = GitlabInstance::parse(instance_origin).map_err(|error| error.to_string())?;
+    let existing = services
+        .store
+        .source_configs()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|config| gitlab::matches_source_config(config, &connection_id));
+    let source_id = existing
+        .as_ref()
+        .map(|config| config.id.clone())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    services
+        .store
+        .put_source_config(&SourceConfig {
+            id: source_id.clone(),
+            connection_id,
+            source_type_id: SourceTypeId(GITLAB_SOURCE_TYPE.into()),
+            display_name: format!("GitLab To-Dos · {}", instance.host_label()),
+            enabled: true,
+            removed_at: None,
+            expected_sync_interval_seconds: GITLAB_SYNC_INTERVAL_SECONDS,
+            settings: serde_json::to_value(GitlabTodoSettings {
+                instance_origin: instance.origin().into(),
+            })
+            .map_err(|_| "cannot encode GitLab To-Dos settings".to_owned())?,
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(source_id)
+}
+
+#[tauri::command]
+fn update_gitlab_source(
+    services: State<'_, Arc<AppServices>>,
+    source_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut config = services
+        .store
+        .source_config(&source_id)
+        .map_err(|error| error.to_string())?;
+    if config.source_type_id.0 != GITLAB_SOURCE_TYPE {
+        return Err("source is not a GitLab To-Dos source".into());
+    }
+    if config.removed_at.is_some() {
+        return Err("removed GitLab source must be added again before enabling".into());
+    }
+    config.enabled = enabled;
+    services
+        .store
+        .put_source_config(&config)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn remove_gitlab_source(
+    services: State<'_, Arc<AppServices>>,
+    source_id: String,
+) -> Result<(), String> {
+    let mut config = services
+        .store
+        .source_config(&source_id)
+        .map_err(|error| error.to_string())?;
+    if config.source_type_id.0 != GITLAB_SOURCE_TYPE {
+        return Err("source is not a GitLab To-Dos source".into());
+    }
+    config.enabled = false;
+    config.removed_at = Some(services.clock.now());
+    services
+        .store
+        .put_source_config(&config)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn disconnect_gitlab(
+    services: State<'_, Arc<AppServices>>,
+    connection_id: String,
+) -> Result<(), String> {
+    services
+        .connections
+        .disconnect(
+            &connection_id,
+            &ProviderId(GITLAB_PROVIDER_ID.into()),
+            &gitlab::credential_key(&connection_id),
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn ensure_gitlab_connection(
+    services: &AppServices,
+    connection_id: &str,
+) -> Result<Connection, String> {
+    services
+        .store
+        .connections()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|connection| {
+            connection.id == connection_id
+                && connection.provider_id.0 == GITLAB_PROVIDER_ID
+                && connection.config["status"] != "disconnected"
+        })
+        .ok_or_else(|| "GitLab connection is unavailable".into())
+}
+
+#[tauri::command]
 fn run_work_command(
     services: State<'_, Arc<AppServices>>,
     work_id: String,
@@ -1598,6 +1934,15 @@ pub fn run() {
             update_github_source,
             remove_github_source,
             disconnect_github,
+            gitlab_connections,
+            start_gitlab_connection,
+            poll_gitlab_connection,
+            cancel_gitlab_connection,
+            connect_gitlab_pat,
+            save_gitlab_todos_source,
+            update_gitlab_source,
+            remove_gitlab_source,
+            disconnect_gitlab,
             run_work_command,
             open_source
         ]);
@@ -1787,6 +2132,68 @@ fn persist_github_connection(
                 .set(&github::credential_key(&connection_id), &previous);
         } else {
             let _ = services.github_tokens.delete(&connection_id);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn persist_gitlab_connection(
+    services: &AppServices,
+    authorization: GitlabAuthorization,
+) -> glancelet_core::Result<()> {
+    let instance_origin = authorization.instance.origin().to_owned();
+    let existing = services
+        .store
+        .connections()?
+        .into_iter()
+        .find(|connection| {
+            gitlab::matches_connection(
+                connection,
+                &authorization.instance,
+                &authorization.identity.id,
+            )
+        });
+    let connection_id = existing
+        .as_ref()
+        .map(|connection| connection.id.clone())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let previous_secret = services
+        .secrets
+        .get(&gitlab::credential_key(&connection_id))?;
+    services
+        .gitlab_tokens
+        .save(&connection_id, &authorization.credential)?;
+    let auth_mode = match authorization.credential {
+        GitlabCredential::OAuth { .. } => "oauth",
+        GitlabCredential::PersonalAccessToken { .. } => "pat",
+    };
+    let result = services.store.connect_connection(
+        &Connection {
+            id: connection_id.clone(),
+            provider_id: ProviderId(GITLAB_PROVIDER_ID.into()),
+            display_name: format!(
+                "{} · {}",
+                authorization.instance.host_label(),
+                authorization.identity.username
+            ),
+            config: json!({
+                "instance_origin": instance_origin,
+                "user_id": authorization.identity.id,
+                "username": authorization.identity.username,
+                "auth_mode": auth_mode,
+                "status": "connected"
+            }),
+        },
+        &[],
+    );
+    if let Err(error) = result {
+        if let Some(previous) = previous_secret {
+            let _ = services
+                .secrets
+                .set(&gitlab::credential_key(&connection_id), &previous);
+        } else {
+            let _ = services.gitlab_tokens.delete(&connection_id);
         }
         return Err(error);
     }
