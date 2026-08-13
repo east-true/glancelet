@@ -18,6 +18,15 @@ use glancelet_core::{
     },
     domain::{ProviderId, SourceTypeId},
     extension::{Connection, ExtensionRegistry, SourceConfig},
+    sources::github::{
+        self, GithubApiClient, GithubDeviceAuthorization, GithubDeviceFlowService,
+        GithubDevicePollResult, GithubRepository, GithubTokenProvider, GithubWorkflowSettings,
+        ASSIGNED_ISSUES_SOURCE_TYPE as GITHUB_ASSIGNED_ISSUES_SOURCE_TYPE,
+        DEFAULT_SYNC_INTERVAL_SECONDS as GITHUB_SYNC_INTERVAL_SECONDS,
+        PROVIDER_ID as GITHUB_PROVIDER_ID,
+        REVIEW_REQUESTS_SOURCE_TYPE as GITHUB_REVIEW_REQUESTS_SOURCE_TYPE,
+        WORKFLOW_FAILURES_SOURCE_TYPE as GITHUB_WORKFLOW_FAILURES_SOURCE_TYPE,
+    },
     sources::google::{
         self, GoogleApiClient, GoogleCalendar, GoogleCalendarSettings, GoogleOAuthService,
         GoogleTokenProvider, DEFAULT_SYNC_INTERVAL_SECONDS as GOOGLE_SYNC_INTERVAL_SECONDS,
@@ -69,6 +78,10 @@ struct AppServices {
     google_tokens: Arc<GoogleTokenProvider>,
     google_oauth: GoogleOAuthService,
     google_client_id: String,
+    github_client: Arc<GithubApiClient>,
+    github_tokens: Arc<GithubTokenProvider>,
+    github_device_flow: GithubDeviceFlowService,
+    github_client_id: String,
     stopping: Arc<AtomicBool>,
 }
 
@@ -184,6 +197,22 @@ impl AppServices {
                 time_context,
             ))
             .map_err(|error| error.to_string())?;
+        let github_client_id = env::var("GLANCELET_GITHUB_CLIENT_ID").unwrap_or_default();
+        let github_client = Arc::new(
+            GithubApiClient::production(Arc::clone(&clock)).map_err(|error| error.to_string())?,
+        );
+        let github_tokens = Arc::new(GithubTokenProvider::new(
+            github_client_id.clone(),
+            Arc::clone(&github_client),
+            Arc::clone(&secrets),
+            Arc::clone(&clock),
+        ));
+        registry
+            .register(github::registration(
+                Arc::clone(&github_client),
+                Arc::clone(&github_tokens),
+            ))
+            .map_err(|error| error.to_string())?;
         let registry = Arc::new(registry);
         #[cfg(feature = "demo-sources")]
         seed_fake_sources(&store)?;
@@ -214,7 +243,7 @@ impl AppServices {
                 Arc::clone(&secrets),
             ),
             navigation: NavigationService::new(store_port),
-            clock,
+            clock: Arc::clone(&clock),
             secrets,
             slack_tokens,
             slack_oauth: SlackOAuthService::production(slack_client, Arc::new(SystemClock)),
@@ -225,6 +254,13 @@ impl AppServices {
             google_client,
             google_tokens,
             google_client_id,
+            github_device_flow: GithubDeviceFlowService::new(
+                Arc::clone(&github_client),
+                Arc::clone(&clock),
+            ),
+            github_client,
+            github_tokens,
+            github_client_id,
             stopping: Arc::new(AtomicBool::new(false)),
         }))
     }
@@ -410,6 +446,36 @@ struct GoogleSourceView {
     last_error: Option<String>,
     #[serde(skip_serializing)]
     authentication_required: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubConnectionView {
+    connection_id: String,
+    login: String,
+    status: String,
+    sources: Vec<GithubSourceView>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubSourceView {
+    source_id: String,
+    source_type: String,
+    name: String,
+    repository: Option<String>,
+    enabled: bool,
+    last_sync: Option<DateTime<Utc>>,
+    last_error: Option<String>,
+    #[serde(skip_serializing)]
+    authentication_required: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubDevicePollView {
+    status: &'static str,
+    retry_after_seconds: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -1116,6 +1182,331 @@ fn disconnect_google(
 }
 
 #[tauri::command]
+fn github_connections(
+    services: State<'_, Arc<AppServices>>,
+) -> Result<Vec<GithubConnectionView>, String> {
+    let configs = services
+        .store
+        .source_configs()
+        .map_err(|error| error.to_string())?;
+    services
+        .store
+        .connections()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|connection| connection.provider_id.0 == GITHUB_PROVIDER_ID)
+        .map(|connection| {
+            let mut sources = configs
+                .iter()
+                .filter(|config| {
+                    config.connection_id == connection.id
+                        && is_github_source_type(&config.source_type_id.0)
+                        && config.removed_at.is_none()
+                })
+                .map(|config| {
+                    let runtime = services
+                        .store
+                        .source_runtime(&config.id)
+                        .map_err(|error| error.to_string())?;
+                    let authentication_required = runtime.authentication_required();
+                    let repository =
+                        if config.source_type_id.0 == GITHUB_WORKFLOW_FAILURES_SOURCE_TYPE {
+                            Some(
+                                serde_json::from_value::<GithubWorkflowSettings>(
+                                    config.settings.clone(),
+                                )
+                                .map_err(|_| "invalid saved GitHub workflow settings".to_owned())?
+                                .repository,
+                            )
+                        } else {
+                            None
+                        };
+                    Ok(GithubSourceView {
+                        source_id: config.id.clone(),
+                        source_type: config.source_type_id.0.clone(),
+                        name: config.display_name.clone(),
+                        repository,
+                        enabled: config.enabled,
+                        last_sync: runtime.last_success_at,
+                        last_error: runtime.last_error,
+                        authentication_required,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            sources.sort_by(|left, right| {
+                left.source_type
+                    .cmp(&right.source_type)
+                    .then_with(|| left.name.cmp(&right.name))
+            });
+            let authentication_required =
+                sources.iter().any(|source| source.authentication_required);
+            let status = connection_status(&connection, authentication_required);
+            Ok(GithubConnectionView {
+                connection_id: connection.id,
+                login: connection.config["login"]
+                    .as_str()
+                    .unwrap_or("GitHub user")
+                    .to_owned(),
+                status: status.into(),
+                sources,
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
+async fn start_github_connection(
+    app: tauri::AppHandle,
+    services: State<'_, Arc<AppServices>>,
+) -> Result<GithubDeviceAuthorization, String> {
+    let authorization = services
+        .github_device_flow
+        .begin(&services.github_client_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = app
+        .opener()
+        .open_url(&authorization.verification_uri, None::<&str>)
+    {
+        services
+            .github_device_flow
+            .cancel(&authorization.session_id);
+        return Err(error.to_string());
+    }
+    Ok(authorization)
+}
+
+#[tauri::command]
+async fn poll_github_connection(
+    services: State<'_, Arc<AppServices>>,
+    session_id: String,
+) -> Result<GithubDevicePollView, String> {
+    match services
+        .github_device_flow
+        .poll(&session_id)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        GithubDevicePollResult::Pending {
+            retry_after_seconds,
+        } => Ok(GithubDevicePollView {
+            status: "pending",
+            retry_after_seconds: Some(retry_after_seconds),
+        }),
+        GithubDevicePollResult::Authorized(authorization) => {
+            persist_github_connection(&services, authorization)
+                .map_err(|error| error.to_string())?;
+            Ok(GithubDevicePollView {
+                status: "authorized",
+                retry_after_seconds: None,
+            })
+        }
+    }
+}
+
+#[tauri::command]
+fn cancel_github_connection(services: State<'_, Arc<AppServices>>, session_id: String) {
+    services.github_device_flow.cancel(&session_id);
+}
+
+#[tauri::command]
+async fn github_repositories(
+    services: State<'_, Arc<AppServices>>,
+    connection_id: String,
+) -> Result<Vec<GithubRepository>, String> {
+    ensure_github_connection(&services, &connection_id)?;
+    let token = services
+        .github_tokens
+        .access_token(&connection_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    services
+        .github_client
+        .repositories(&token)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_github_global_source(
+    services: State<'_, Arc<AppServices>>,
+    connection_id: String,
+    source_type: String,
+) -> Result<String, String> {
+    ensure_github_connection(&services, &connection_id)?;
+    let display_name = match source_type.as_str() {
+        GITHUB_REVIEW_REQUESTS_SOURCE_TYPE => "GitHub Review Requests",
+        GITHUB_ASSIGNED_ISSUES_SOURCE_TYPE => "GitHub Assigned Issues",
+        _ => return Err("unsupported global GitHub source type".into()),
+    };
+    let existing = services
+        .store
+        .source_configs()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|config| github::matches_global_source_config(config, &connection_id, &source_type));
+    let source_id = existing
+        .as_ref()
+        .map(|config| config.id.clone())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    services
+        .store
+        .put_source_config(&SourceConfig {
+            id: source_id.clone(),
+            connection_id,
+            source_type_id: SourceTypeId(source_type),
+            display_name: display_name.into(),
+            enabled: true,
+            removed_at: None,
+            expected_sync_interval_seconds: GITHUB_SYNC_INTERVAL_SECONDS,
+            settings: json!({}),
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(source_id)
+}
+
+#[tauri::command]
+async fn save_github_workflow_source(
+    services: State<'_, Arc<AppServices>>,
+    connection_id: String,
+    repository_id: u64,
+) -> Result<String, String> {
+    ensure_github_connection(&services, &connection_id)?;
+    let token = services
+        .github_tokens
+        .access_token(&connection_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let repositories = services
+        .github_client
+        .repositories(&token)
+        .await
+        .map_err(|error| error.to_string())?;
+    let repository = repositories
+        .into_iter()
+        .find(|repository| repository.id == repository_id)
+        .ok_or_else(|| "The GitHub App does not have access to this repository".to_owned())?;
+    let existing = services
+        .store
+        .source_configs()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|config| {
+            github::matches_workflow_source_config(config, &connection_id, repository_id)
+        });
+    let source_id = existing
+        .as_ref()
+        .map(|config| config.id.clone())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let display_name = format!("{} workflow failures", repository.full_name);
+    services
+        .store
+        .put_source_config(&SourceConfig {
+            id: source_id.clone(),
+            connection_id,
+            source_type_id: SourceTypeId(GITHUB_WORKFLOW_FAILURES_SOURCE_TYPE.into()),
+            display_name,
+            enabled: true,
+            removed_at: None,
+            expected_sync_interval_seconds: GITHUB_SYNC_INTERVAL_SECONDS,
+            settings: serde_json::to_value(GithubWorkflowSettings {
+                repository_id: repository.id,
+                repository_node_id: repository.node_id,
+                repository: repository.full_name,
+                default_branch: repository.default_branch,
+            })
+            .map_err(|_| "cannot encode GitHub workflow settings".to_owned())?,
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(source_id)
+}
+
+#[tauri::command]
+fn update_github_source(
+    services: State<'_, Arc<AppServices>>,
+    source_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut config = services
+        .store
+        .source_config(&source_id)
+        .map_err(|error| error.to_string())?;
+    if !is_github_source_type(&config.source_type_id.0) {
+        return Err("source is not a GitHub source".into());
+    }
+    if config.removed_at.is_some() {
+        return Err("removed GitHub source must be added again before enabling".into());
+    }
+    config.enabled = enabled;
+    services
+        .store
+        .put_source_config(&config)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn remove_github_source(
+    services: State<'_, Arc<AppServices>>,
+    source_id: String,
+) -> Result<(), String> {
+    let mut config = services
+        .store
+        .source_config(&source_id)
+        .map_err(|error| error.to_string())?;
+    if !is_github_source_type(&config.source_type_id.0) {
+        return Err("source is not a GitHub source".into());
+    }
+    config.enabled = false;
+    config.removed_at = Some(services.clock.now());
+    services
+        .store
+        .put_source_config(&config)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn disconnect_github(
+    services: State<'_, Arc<AppServices>>,
+    connection_id: String,
+) -> Result<(), String> {
+    services
+        .connections
+        .disconnect(
+            &connection_id,
+            &ProviderId(GITHUB_PROVIDER_ID.into()),
+            &github::credential_key(&connection_id),
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn ensure_github_connection(services: &AppServices, connection_id: &str) -> Result<(), String> {
+    let exists = services
+        .store
+        .connections()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .any(|connection| {
+            connection.id == connection_id
+                && connection.provider_id.0 == GITHUB_PROVIDER_ID
+                && connection.config["status"] != "disconnected"
+        });
+    if exists {
+        Ok(())
+    } else {
+        Err("GitHub connection is unavailable".into())
+    }
+}
+
+fn is_github_source_type(source_type: &str) -> bool {
+    matches!(
+        source_type,
+        GITHUB_REVIEW_REQUESTS_SOURCE_TYPE
+            | GITHUB_ASSIGNED_ISSUES_SOURCE_TYPE
+            | GITHUB_WORKFLOW_FAILURES_SOURCE_TYPE
+    )
+}
+
+#[tauri::command]
 fn run_work_command(
     services: State<'_, Arc<AppServices>>,
     work_id: String,
@@ -1206,6 +1597,16 @@ pub fn run() {
             update_google_source,
             remove_google_source,
             disconnect_google,
+            github_connections,
+            start_github_connection,
+            poll_github_connection,
+            cancel_github_connection,
+            github_repositories,
+            save_github_global_source,
+            save_github_workflow_source,
+            update_github_source,
+            remove_github_source,
+            disconnect_github,
             run_work_command,
             open_source
         ]);
@@ -1347,6 +1748,54 @@ fn persist_google_connection(
                 .set(&google::credential_key(&connection_id), &previous);
         } else {
             let _ = services.google_tokens.delete(&connection_id);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn persist_github_connection(
+    services: &AppServices,
+    authorization: github::GithubAuthorization,
+) -> glancelet_core::Result<()> {
+    let existing = services
+        .store
+        .connections()?
+        .into_iter()
+        .find(|connection| {
+            connection.provider_id.0 == GITHUB_PROVIDER_ID
+                && connection.config["user_id"] == authorization.identity.id
+        });
+    let connection_id = existing
+        .as_ref()
+        .map(|connection| connection.id.clone())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let previous_secret = services
+        .secrets
+        .get(&github::credential_key(&connection_id))?;
+    services
+        .github_tokens
+        .save(&connection_id, &authorization.credential)?;
+    let result = services.store.connect_connection(
+        &Connection {
+            id: connection_id.clone(),
+            provider_id: ProviderId(GITHUB_PROVIDER_ID.into()),
+            display_name: authorization.identity.login.clone(),
+            config: json!({
+                "user_id": authorization.identity.id,
+                "login": authorization.identity.login,
+                "status": "connected"
+            }),
+        },
+        &[],
+    );
+    if let Err(error) = result {
+        if let Some(previous) = previous_secret {
+            let _ = services
+                .secrets
+                .set(&github::credential_key(&connection_id), &previous);
+        } else {
+            let _ = services.github_tokens.delete(&connection_id);
         }
         return Err(error);
     }

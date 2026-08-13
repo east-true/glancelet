@@ -429,6 +429,16 @@ h1 {
 .source-actions .danger {
   color: var(--gl-danger);
 }
+.github-device-code code {
+  color: var(--gl-accent);
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+.github-device-code span {
+  color: var(--gl-text-muted);
+  font-size: 0.8rem;
+}
 .empty-source {
   color: var(--gl-text-muted);
   font-size: 13px;

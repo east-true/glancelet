@@ -176,6 +176,46 @@ export interface GoogleConnection {
   sources: GoogleCalendarSource[];
 }
 
+export interface GithubDeviceAuthorization {
+  sessionId: string;
+  userCode: string;
+  verificationUri: string;
+  expiresAt: string;
+  retryAfterSeconds: number;
+}
+
+export interface GithubDevicePoll {
+  status: "pending" | "authorized";
+  retryAfterSeconds: number | null;
+}
+
+export interface GithubRepository {
+  id: number;
+  nodeId: string;
+  fullName: string;
+  defaultBranch: string;
+}
+
+export interface GithubSource {
+  sourceId: string;
+  sourceType:
+    | "github.review_requests"
+    | "github.assigned_issues"
+    | "github.workflow_failures";
+  name: string;
+  repository: string | null;
+  enabled: boolean;
+  lastSync: string | null;
+  lastError: string | null;
+}
+
+export interface GithubConnection {
+  connectionId: string;
+  login: string;
+  status: "connected" | "reauth_required" | "disconnected";
+  sources: GithubSource[];
+}
+
 export type WorkCommand =
   | { type: "plan"; date: string }
   | { type: "move_to_inbox" }
@@ -270,6 +310,31 @@ export const glanceletApi = {
     invoke<void>("remove_google_source", { sourceId }),
   disconnectGoogle: (connectionId: string) =>
     invoke<void>("disconnect_google", { connectionId }),
+  githubConnections: () => invoke<GithubConnection[]>("github_connections"),
+  startGithubConnection: () =>
+    invoke<GithubDeviceAuthorization>("start_github_connection"),
+  pollGithubConnection: (sessionId: string) =>
+    invoke<GithubDevicePoll>("poll_github_connection", { sessionId }),
+  cancelGithubConnection: (sessionId: string) =>
+    invoke<void>("cancel_github_connection", { sessionId }),
+  githubRepositories: (connectionId: string) =>
+    invoke<GithubRepository[]>("github_repositories", { connectionId }),
+  saveGithubGlobalSource: (connectionId: string, sourceType: string) =>
+    invoke<string>("save_github_global_source", {
+      connectionId,
+      sourceType,
+    }),
+  saveGithubWorkflowSource: (connectionId: string, repositoryId: number) =>
+    invoke<string>("save_github_workflow_source", {
+      connectionId,
+      repositoryId,
+    }),
+  updateGithubSource: (sourceId: string, enabled: boolean) =>
+    invoke<void>("update_github_source", { sourceId, enabled }),
+  removeGithubSource: (sourceId: string) =>
+    invoke<void>("remove_github_source", { sourceId }),
+  disconnectGithub: (connectionId: string) =>
+    invoke<void>("disconnect_github", { connectionId }),
   command: (workId: string, command: WorkCommand) =>
     invoke<void>("run_work_command", { workId, command }),
   openSource: (workId: string) => invoke<void>("open_source", { workId }),

@@ -4,6 +4,7 @@ import {
   glanceletApi,
   syncReportMessage,
   type GoogleConnection,
+  type GithubConnection,
   type NotionConnection,
   type NotionDataSource,
   type NotionDataSourceSummary,
@@ -18,6 +19,7 @@ import {
   type WorkView,
 } from "./api";
 import { GoogleSettings } from "./GoogleSettings";
+import { GithubSettings } from "./GithubSettings";
 import { localDateString } from "./local-time";
 import "./styles.css";
 
@@ -36,6 +38,9 @@ export default function App() {
   >([]);
   const [googleConnections, setGoogleConnections] = useState<
     GoogleConnection[]
+  >([]);
+  const [githubConnections, setGithubConnections] = useState<
+    GithubConnection[]
   >([]);
   const [initialLoading, setInitialLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -88,15 +93,25 @@ export default function App() {
     }
   }, []);
 
+  const refreshGithub = useCallback(async (clearError = true) => {
+    try {
+      if (clearError) setError(null);
+      setGithubConnections((await glanceletApi.githubConnections()) ?? []);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }, []);
+
   const refreshSources = useCallback(
     async (clearError = true) => {
       await Promise.all([
         refreshSlack(clearError),
         refreshNotion(clearError),
         refreshGoogle(clearError),
+        refreshGithub(clearError),
       ]);
     },
-    [refreshGoogle, refreshNotion, refreshSlack],
+    [refreshGithub, refreshGoogle, refreshNotion, refreshSlack],
   );
 
   useEffect(() => {
@@ -249,6 +264,13 @@ export default function App() {
             busy={globalBusy}
             connections={googleConnections}
             refresh={refreshGoogle}
+            refreshWork={refresh}
+            setError={setError}
+          />
+          <GithubSettings
+            busy={globalBusy}
+            connections={githubConnections}
+            refresh={refreshGithub}
             refreshWork={refresh}
             setError={setError}
           />

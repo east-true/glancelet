@@ -72,6 +72,7 @@ test("loads Slack settings through Tauri commands", async () => {
     .mockResolvedValueOnce({ today: [], inbox: [] })
     .mockResolvedValueOnce([])
     .mockResolvedValueOnce([])
+    .mockResolvedValueOnce([])
     .mockResolvedValueOnce([]);
   render(<App />);
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("dashboard"));
@@ -81,9 +82,182 @@ test("loads Slack settings through Tauri commands", async () => {
   );
   expect(mocks.invoke).toHaveBeenCalledWith("notion_connections");
   expect(mocks.invoke).toHaveBeenCalledWith("google_connections");
+  expect(mocks.invoke).toHaveBeenCalledWith("github_connections");
   expect(screen.getByText("No Slack workspace connected.")).toBeInTheDocument();
   expect(screen.getByText("No Notion account connected.")).toBeInTheDocument();
   expect(screen.getByText("No Google account connected.")).toBeInTheDocument();
+  expect(screen.getByText("No GitHub account connected.")).toBeInTheDocument();
+});
+
+test("shows the GitHub Device Flow code while authorization is pending", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard")
+      return Promise.resolve({ today: [], inbox: [] });
+    if (command.endsWith("_connections")) return Promise.resolve([]);
+    if (command === "start_github_connection") {
+      return Promise.resolve({
+        sessionId: "device-session",
+        userCode: "ABCD-EFGH",
+        verificationUri: "https://github.com/login/device",
+        expiresAt: "2026-08-13T01:00:00Z",
+        retryAfterSeconds: 60,
+      });
+    }
+    return Promise.resolve(undefined);
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Connect GitHub" }),
+  );
+  expect(await screen.findByText("ABCD-EFGH")).toBeInTheDocument();
+  expect(
+    screen.getByText("https://github.com/login/device"),
+  ).toBeInTheDocument();
+  expect(mocks.invoke).toHaveBeenCalledWith("start_github_connection");
+});
+
+test("configures global and repository-scoped GitHub sources", async () => {
+  mocks.invoke.mockImplementation((command: string, payload?: unknown) => {
+    if (command === "dashboard")
+      return Promise.resolve({ today: [], inbox: [] });
+    if (command === "slack_connections") return Promise.resolve([]);
+    if (command === "notion_connections") return Promise.resolve([]);
+    if (command === "google_connections") return Promise.resolve([]);
+    if (command === "github_connections") {
+      return Promise.resolve([
+        {
+          connectionId: "github-1",
+          login: "octocat",
+          status: "connected",
+          sources: [],
+        },
+      ]);
+    }
+    if (command === "github_repositories") {
+      return Promise.resolve([
+        {
+          id: 99,
+          nodeId: "R_99",
+          fullName: "acme/backend",
+          defaultBranch: "main",
+        },
+      ]);
+    }
+    if (
+      command === "save_github_global_source" ||
+      command === "save_github_workflow_source"
+    ) {
+      return Promise.resolve("source-id");
+    }
+    return Promise.resolve(payload);
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Refresh repositories" }),
+  );
+  expect(await screen.findByText("acme/backend")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Add Review Requests" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("save_github_global_source", {
+      connectionId: "github-1",
+      sourceType: "github.review_requests",
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Add" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("save_github_workflow_source", {
+      connectionId: "github-1",
+      repositoryId: 99,
+    }),
+  );
+});
+
+test("runs the GitHub source lifecycle through Tauri commands", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard")
+      return Promise.resolve({ today: [], inbox: [] });
+    if (
+      command === "slack_connections" ||
+      command === "notion_connections" ||
+      command === "google_connections"
+    ) {
+      return Promise.resolve([]);
+    }
+    if (command === "github_connections") {
+      return Promise.resolve([
+        {
+          connectionId: "github-1",
+          login: "octocat",
+          status: "connected",
+          sources: [
+            {
+              sourceId: "github-source",
+              sourceType: "github.review_requests",
+              name: "GitHub Review Requests",
+              repository: null,
+              enabled: true,
+              lastSync: "2026-08-13T00:00:00Z",
+              lastError: null,
+            },
+          ],
+        },
+      ]);
+    }
+    if (command === "sync_source") {
+      return Promise.resolve({
+        refreshRequired: false,
+        succeeded: [],
+        failed: [],
+        projectionFailures: [],
+      });
+    }
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  expect(await screen.findByText("GitHub Review Requests")).toBeInTheDocument();
+  expect(screen.getByText(/Last sync:/)).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Sync now" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("sync_source", {
+      sourceId: "github-source",
+    }),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Disable" })).toBeEnabled(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Disable" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("update_github_source", {
+      sourceId: "github-source",
+      enabled: false,
+    }),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Remove" })).toBeEnabled(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("remove_github_source", {
+      sourceId: "github-source",
+    }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Disconnect GitHub" }),
+    ).toBeEnabled(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Disconnect GitHub" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("disconnect_github", {
+      connectionId: "github-1",
+    }),
+  );
 });
 
 test("maps a Notion data source by property id and previews without storing the token", async () => {
