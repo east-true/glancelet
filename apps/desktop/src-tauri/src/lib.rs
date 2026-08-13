@@ -33,7 +33,6 @@ use glancelet_core::{
         PROVIDER_ID as SLACK_PROVIDER_ID, SOURCE_TYPE as SLACK_SOURCE_TYPE,
     },
     storage::{KeyringSecretStore, SqliteWorkStore},
-    GlanceletError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -112,17 +111,6 @@ impl SyncReport {
                 .map(|failure| format!("Projection: {failure}")),
         );
         (!failures.is_empty()).then(|| failures.join("; "))
-    }
-}
-
-fn sync_failure_kind(error: &GlanceletError) -> SourceFailureKind {
-    match error {
-        GlanceletError::AuthenticationRequired(_) => SourceFailureKind::AuthenticationRequired,
-        GlanceletError::ConfigurationRequired(_) => SourceFailureKind::ConfigurationRequired,
-        GlanceletError::RateLimited { .. } => SourceFailureKind::RateLimited,
-        GlanceletError::TransientNetwork(_) => SourceFailureKind::TransientNetwork,
-        GlanceletError::ProviderFailure(_) => SourceFailureKind::ProviderFailure,
-        _ => SourceFailureKind::Other,
     }
 }
 
@@ -291,7 +279,7 @@ impl AppServices {
                     let kind = runtime
                         .as_ref()
                         .and_then(|runtime| runtime.failure_kind)
-                        .unwrap_or_else(|| sync_failure_kind(&error));
+                        .unwrap_or_else(|| SourceFailureKind::from(&error));
                     let next_retry_at = runtime.and_then(|runtime| runtime.next_sync_at);
                     report.failed.push(SyncSourceFailure {
                         source_id,
@@ -335,7 +323,7 @@ impl AppServices {
                 let kind = runtime
                     .as_ref()
                     .and_then(|runtime| runtime.failure_kind)
-                    .unwrap_or_else(|| sync_failure_kind(&error));
+                    .unwrap_or_else(|| SourceFailureKind::from(&error));
                 let next_retry_at = runtime.and_then(|runtime| runtime.next_sync_at);
                 report.failed.push(SyncSourceFailure {
                     source_id: source_id.into(),

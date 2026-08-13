@@ -374,6 +374,31 @@ impl SqliteWorkStore {
                 )
                 .map_err(storage_error)?;
         }
+        let unused_indexes_applied = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=6)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(storage_error)?;
+        if !unused_indexes_applied {
+            // `source_changes_pending` and `source_changes_entity_pending` already serve
+            // every pending-projection query; the planner never chose these two, so they
+            // only cost writes.
+            transaction
+                .execute_batch(
+                    "DROP INDEX IF EXISTS source_changes_projection_due;
+                     DROP INDEX IF EXISTS source_changes_projection_ready;",
+                )
+                .map_err(storage_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version, name)
+                     VALUES (6, '006_drop_unused_projection_indexes')",
+                    [],
+                )
+                .map_err(storage_error)?;
+        }
         transaction.commit().map_err(storage_error)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -644,25 +669,6 @@ impl WorkStore for SqliteWorkStore {
             )
             .map_err(storage_error)?;
         ensure_current_sync(updated)
-    }
-
-    fn clear_sync_failure(&self, id: &str) -> Result<()> {
-        let updated = self
-            .connection
-            .lock()
-            .expect("sqlite connection poisoned")
-            .execute(
-                "UPDATE source_runtime
-                 SET next_sync_at=NULL, failure_count=0, last_error=NULL,
-                     failure_kind=NULL, config_revision=config_revision+1
-                 WHERE source_config_id=?1",
-                [id],
-            )
-            .map_err(storage_error)?;
-        if updated == 0 {
-            return Err(GlanceletError::NotFound(format!("source runtime {id}")));
-        }
-        Ok(())
     }
 
     fn apply_source_batch(

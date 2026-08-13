@@ -22,7 +22,7 @@ use crate::{
         WorkProgress,
     },
     extension::{Connection, SourceConfig},
-    Result,
+    GlanceletError, Result,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +34,19 @@ pub enum SourceFailureKind {
     TransientNetwork,
     ProviderFailure,
     Other,
+}
+
+impl From<&GlanceletError> for SourceFailureKind {
+    fn from(error: &GlanceletError) -> Self {
+        match error {
+            GlanceletError::AuthenticationRequired(_) => Self::AuthenticationRequired,
+            GlanceletError::ConfigurationRequired(_) => Self::ConfigurationRequired,
+            GlanceletError::RateLimited { .. } => Self::RateLimited,
+            GlanceletError::TransientNetwork(_) => Self::TransientNetwork,
+            GlanceletError::ProviderFailure(_) => Self::ProviderFailure,
+            _ => Self::Other,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -129,7 +142,6 @@ pub trait WorkStore: Send + Sync {
         kind: SourceFailureKind,
         error: &str,
     ) -> Result<()>;
-    fn clear_sync_failure(&self, id: &str) -> Result<()>;
     fn apply_source_batch(
         &self,
         config: &SourceConfig,
