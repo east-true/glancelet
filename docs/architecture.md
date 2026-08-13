@@ -20,6 +20,8 @@ Notion is registered through that same boundary without Core or schema branches.
 
 Google Calendar is the first real delta source. Its bounded daily reconciliation and `syncToken` pagination both stay inside `sources::google`, returning only the existing `FullSnapshot` or `Delta` batches. A 410 response triggers a complete bounded fetch before any replacement checkpoint can commit. Recurrence is expanded by Google and normalized as occurrence-level entities using `recurringEventId + originalStartTime`; no RRULE model enters Core. One Google Connection can own multiple independent Calendar SourceConfigs and checkpoints. Calendar work is an existing Mirror Event with no progress authority. An attendee transition to declined is an ordinary Delta deactivation, and accepting again is an ordinary upsert/reactivation. `endTimeUnspecified` maps to the existing optional Event end rather than a provider-specific temporal type.
 
+GitHub was implemented after the Core v0 freeze without reopening it. One GitHub Connection owns two global SourceConfigs (Review Requests and Assigned Issues) plus independent repository-scoped Workflow Failure SourceConfigs. All return authoritative `FullSnapshot` batches. Reviews and issues project existing Mirror Actions, while a repository's latest completed failing workflow projects a Mirror Attention keyed by workflow ID. GitHub App Device Flow, user-token refresh, installation-aware repository discovery, Search completeness checks, and Actions DTOs remain inside `sources::github`; no GitHub branch or table enters Core.
+
 Core contains no provider-ID behavior branches, and SQLite contains no provider-specific tables or columns. Provider configuration and minimal normalized metadata remain in the existing generic JSON fields.
 
 Event ranges use provider-neutral half-open `[start, end)` semantics. This represents Google all-day exclusive ends and timed/multi-day events without provider-specific domain fields, while preserving Notion date-only values and Google IANA timezone metadata in `TemporalValue`.
@@ -33,6 +35,12 @@ Validated real sources:
 - Slack reaction Capture — FullSnapshot, local progress
 - Notion data source tasks — Mirror FullSnapshot, external progress
 - Google Calendar — Mirror FullSnapshot + Delta, occurrence Events, no progress
+
+Implemented on the frozen contracts:
+
+- GitHub Review Requests — Mirror FullSnapshot Actions, no progress
+- GitHub Assigned Issues — Mirror FullSnapshot Actions, no progress
+- GitHub Workflow Failures — repository-scoped Mirror FullSnapshot Attentions, no progress
 
 Phase 3.5 integration tests cover source lifecycle restoration, multi-provider failure isolation and single-flight, restart persistence, credential separation, Google declined transitions, and unspecified Event ends. All current Core boundaries are stable for these providers.
 

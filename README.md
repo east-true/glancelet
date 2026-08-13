@@ -16,7 +16,8 @@
 <!-- Screenshot of the Today / Inbox HUD goes here. -->
 
 Glancelet pulls work out of the tools it already lives in — Slack, Notion, Google
-Calendar — and puts it into a presentation-safe desktop view you can keep on screen.
+Calendar, and GitHub — and puts it into a presentation-safe desktop view you can
+keep on screen.
 
 The original service always remains the source of truth. Glancelet does not try to
 replace it or own your data: it helps you **discover** what needs attention,
@@ -34,6 +35,7 @@ There is no Glancelet server.
 - **Slack reaction capture** — react to a message to capture it as work.
 - **Notion data source tasks** — mirror tasks from a Notion data source, with your own property mapping.
 - **Google Calendar** — bring today's events into the same view.
+- **GitHub work sources** — follow review requests, assigned issues, and repository workflow failures.
 - **Plan, snooze, pin, dismiss** — lightweight local disposition that never writes back to the provider.
 - **Presentation-safe boundary** — the HUD only ever receives a curated `WorkView`; credentials, raw provider payloads, and database layout never cross into the UI, and navigation targets are validated before the OS opens them.
 - **Extensible by design** — sources register through a single extension boundary, so official and fork-specific sources use the same path.
@@ -93,8 +95,8 @@ contains no provider-specific logic — that boundary is what makes a new source
 contained addition rather than a change to the core.
 
 ```text
-Slack / Notion / Google source → SourceBatch → SourceEntity → durable SourceChange
-                    → WorkProjector → WorkEntry → WorkView → Today / Inbox HUD
+Slack / Notion / Google / GitHub source → SourceBatch → SourceEntity → durable SourceChange
+                             → WorkProjector → WorkEntry → WorkView → Today / Inbox HUD
 ```
 
 [`docs/architecture.md`](docs/architecture.md) covers the boundaries, the migration
@@ -108,10 +110,11 @@ history, and the omissions that were deliberate.
 | [Slack setup](docs/slack-development.md)                     | Development Slack App and Secret Service setup                        |
 | [Notion setup](docs/notion-development.md)                   | Notion PAT, task mapping, and manual E2E setup                        |
 | [Google Calendar setup](docs/google-calendar-development.md) | Google Desktop OAuth, calendar selection, and manual E2E setup        |
+| [GitHub setup](docs/github-development.md)                   | GitHub App Device Flow, permissions, source setup, and manual E2E     |
 
 ## Repository layout
 
-- `crates/glancelet-core` — domain, application services, the extension boundary, the Slack/Notion/Google sources, and the SQLite adapter
+- `crates/glancelet-core` — domain, application services, the extension boundary, the Slack/Notion/Google/GitHub sources, and the SQLite adapter
 - `apps/desktop` — the React HUD and its thin Tauri command layer
 - `docs/` — architecture and per-source setup guides
 
