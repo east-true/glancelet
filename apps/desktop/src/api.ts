@@ -77,6 +77,39 @@ export interface WorkView {
 export interface WorkDashboard {
   today: WorkView[];
   inbox: WorkView[];
+  upcoming: UpcomingWorkView[];
+  attention: WorkView[];
+  sourceHealth: SourceHealth;
+}
+
+export interface UpcomingWorkView {
+  date: string;
+  basis: "event" | "planned" | "due";
+  work: WorkView;
+}
+
+export interface SourceHealth {
+  sourceCount: number;
+  issues: {
+    sourceId: string;
+    sourceName: string;
+    kind: SyncFailureKind;
+  }[];
+}
+
+export type WidgetType = "today" | "inbox" | "upcoming" | "attention";
+export type WidgetSize = "compact" | "wide" | "tall";
+
+export interface WidgetInstance {
+  widgetType: WidgetType;
+  position: number;
+  size: WidgetSize;
+  settings: Record<string, unknown>;
+}
+
+export interface DesktopSettings {
+  alwaysOnTop: boolean;
+  launchAtStartup: boolean;
 }
 
 export interface SlackConnection {
@@ -282,6 +315,14 @@ export function syncReportMessage(
 
 export const glanceletApi = {
   dashboard: () => invoke<WorkDashboard>("dashboard"),
+  widgetLayout: () => invoke<WidgetInstance[]>("widget_layout"),
+  saveWidgetLayout: (widgets: WidgetInstance[]) =>
+    invoke<void>("save_widget_layout", { widgets }),
+  desktopSettings: () => invoke<DesktopSettings>("desktop_settings"),
+  setAlwaysOnTop: (enabled: boolean) =>
+    invoke<void>("set_always_on_top", { enabled }),
+  setLaunchAtStartup: (enabled: boolean) =>
+    invoke<void>("set_launch_at_startup", { enabled }),
   sync: () => invoke<SyncReport>("sync_all"),
   slackConnections: () => invoke<SlackConnection[]>("slack_connections"),
   connectSlack: () => invoke<void>("connect_slack"),

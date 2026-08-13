@@ -3,6 +3,7 @@ mod connection;
 mod navigation;
 mod secrets;
 mod sync;
+mod widgets;
 mod work;
 
 pub use clock::*;
@@ -10,6 +11,7 @@ pub use connection::*;
 pub use navigation::*;
 pub use secrets::*;
 pub use sync::*;
+pub use widgets::*;
 pub use work::*;
 
 use chrono::{DateTime, Utc};
@@ -183,6 +185,10 @@ pub trait WorkStore: Send + Sync {
     ) -> Result<()>;
     fn stored_work(&self) -> Result<Vec<StoredWork>>;
     fn dashboard_work(&self, now: DateTime<Utc>) -> Result<Vec<StoredWork>>;
+    fn widget_layout(&self) -> Result<Vec<WidgetInstance>>;
+    fn save_widget_layout(&self, widgets: &[WidgetInstance]) -> Result<()>;
+    fn desktop_preferences(&self) -> Result<DesktopPreferences>;
+    fn save_desktop_preferences(&self, preferences: &DesktopPreferences) -> Result<()>;
     fn stored_work_by_id(&self, id: &str) -> Result<StoredWork>;
     fn mutate_work(&self, id: &str, mutation: WorkMutation, now: DateTime<Utc>) -> Result<()>;
     fn transition_local_progress(

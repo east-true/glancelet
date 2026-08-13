@@ -14,24 +14,57 @@ import {
   type NotionSource,
   type NotionSourceSettings,
   type SlackConnection,
-  type WorkAction,
+  type DesktopSettings,
+  type WidgetInstance,
   type WorkCommand,
   type WorkDashboard,
-  type WorkView,
 } from "./api";
+import { DesktopSurface } from "./DesktopSurface";
 import { GoogleSettings } from "./GoogleSettings";
 import { GithubSettings } from "./GithubSettings";
 import { GitlabSettings } from "./GitlabSettings";
-import { localDateString } from "./local-time";
 import "./styles.css";
 
-const emptyDashboard: WorkDashboard = { today: [], inbox: [] };
+const emptyDashboard: WorkDashboard = {
+  today: [],
+  inbox: [],
+  upcoming: [],
+  attention: [],
+  sourceHealth: { sourceCount: 0, issues: [] },
+};
+const defaultLayout: WidgetInstance[] = [
+  { widgetType: "today", position: 0, size: "wide", settings: {} },
+  { widgetType: "inbox", position: 1, size: "compact", settings: {} },
+  { widgetType: "attention", position: 2, size: "compact", settings: {} },
+];
 const DASHBOARD_TIME_REFRESH_MS = 60_000;
-type Tab = keyof WorkDashboard | "settings";
+type Tab = "surface" | "sources" | "settings";
+
+function normalizedDashboard(value: WorkDashboard | undefined): WorkDashboard {
+  const today = value?.today ?? [];
+  const inbox = value?.inbox ?? [];
+  const attention = value?.attention ?? [];
+  return {
+    today,
+    inbox,
+    upcoming: value?.upcoming ?? [],
+    attention,
+    sourceHealth: value?.sourceHealth ?? {
+      sourceCount: today.length + inbox.length + attention.length > 0 ? 1 : 0,
+      issues: [],
+    },
+  };
+}
 
 export default function App() {
   const [dashboard, setDashboard] = useState(emptyDashboard);
-  const [tab, setTab] = useState<Tab>("today");
+  const [tab, setTab] = useState<Tab>("surface");
+  const [layout, setLayout] = useState<WidgetInstance[]>(defaultLayout);
+  const [editingLayout, setEditingLayout] = useState(false);
+  const [desktopSettings, setDesktopSettings] = useState<DesktopSettings>({
+    alwaysOnTop: false,
+    launchAtStartup: false,
+  });
   const [slackConnections, setSlackConnections] = useState<SlackConnection[]>(
     [],
   );
@@ -56,14 +89,15 @@ export default function App() {
   const pendingWorkIdsRef = useRef(new Set<string>());
   const [error, setError] = useState<string | null>(null);
   const dashboardRequest = useRef(0);
-  const tabRef = useRef<Tab>("today");
+  const tabRef = useRef<Tab>("surface");
 
   const refresh = useCallback(async (clearError = true) => {
     const request = ++dashboardRequest.current;
     try {
       if (clearError) setError(null);
       const next = await glanceletApi.dashboard();
-      if (request === dashboardRequest.current) setDashboard(next);
+      if (request === dashboardRequest.current)
+        setDashboard(normalizedDashboard(next));
     } catch (reason) {
       if (request === dashboardRequest.current) setError(String(reason));
     } finally {
@@ -138,7 +172,7 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     void listen("glancelet://work-changed", () => {
       void refresh(false);
-      if (tabRef.current === "settings") void refreshSources(false);
+      if (tabRef.current === "sources") void refreshSources(false);
     }).then((dispose) => {
       if (disposed) dispose();
       else unlisten = dispose;
@@ -147,7 +181,18 @@ export default function App() {
       () => void refresh(false),
       DASHBOARD_TIME_REFRESH_MS,
     );
-    const initialRefresh = window.setTimeout(() => void refresh(), 0);
+    const initialRefresh = window.setTimeout(() => {
+      void refresh();
+      void Promise.resolve(glanceletApi.widgetLayout())
+        .then((widgets) =>
+          setLayout(
+            Array.isArray(widgets) && widgets.length > 0
+              ? widgets
+              : defaultLayout,
+          ),
+        )
+        .catch((reason) => setError(String(reason)));
+    }, 0);
     return () => {
       disposed = true;
       dashboardRequest.current += 1;
@@ -156,6 +201,42 @@ export default function App() {
       window.clearInterval(timer);
     };
   }, [refresh, refreshSources]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlistenNavigation: (() => void) | undefined;
+    let unlistenSettings: (() => void) | undefined;
+    void listen<string>("glancelet://navigate", (event) => {
+      if (event.payload === "sources" || event.payload === "settings") {
+        tabRef.current = event.payload;
+        setTab(event.payload);
+        if (event.payload === "sources") void refreshSources();
+        else {
+          void glanceletApi.desktopSettings().then((settings) => {
+            if (settings) setDesktopSettings(settings);
+          });
+        }
+      }
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlistenNavigation = dispose;
+    });
+    void listen("glancelet://desktop-settings-changed", () => {
+      if (tabRef.current === "settings") {
+        void glanceletApi.desktopSettings().then((settings) => {
+          if (settings) setDesktopSettings(settings);
+        });
+      }
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlistenSettings = dispose;
+    });
+    return () => {
+      disposed = true;
+      unlistenNavigation?.();
+      unlistenSettings?.();
+    };
+  }, [refreshSources]);
 
   async function sync() {
     if (syncing) return;
@@ -166,7 +247,7 @@ export default function App() {
       setError(syncReportMessage(report));
       await Promise.all([
         refresh(false),
-        tabRef.current === "settings"
+        tabRef.current === "sources"
           ? refreshSources(false)
           : Promise.resolve(),
       ]);
@@ -180,7 +261,46 @@ export default function App() {
   async function selectTab(next: Tab) {
     tabRef.current = next;
     setTab(next);
-    if (next === "settings") await refreshSources();
+    if (next === "sources") await refreshSources();
+    if (next === "settings") await refreshDesktopSettings();
+  }
+
+  async function refreshDesktopSettings() {
+    try {
+      const settings = await glanceletApi.desktopSettings();
+      if (settings) setDesktopSettings(settings);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function saveLayout(next: WidgetInstance[]) {
+    const previous = layout;
+    setLayout(next);
+    try {
+      setError(null);
+      await glanceletApi.saveWidgetLayout(next);
+    } catch (reason) {
+      setLayout(previous);
+      setError(String(reason));
+    }
+  }
+
+  async function updateDesktopSetting(
+    key: keyof DesktopSettings,
+    enabled: boolean,
+  ) {
+    const previous = desktopSettings;
+    const next = { ...previous, [key]: enabled };
+    setDesktopSettings(next);
+    try {
+      setError(null);
+      if (key === "alwaysOnTop") await glanceletApi.setAlwaysOnTop(enabled);
+      else await glanceletApi.setLaunchAtStartup(enabled);
+    } catch (reason) {
+      setDesktopSettings(previous);
+      setError(String(reason));
+    }
   }
 
   async function connectSlack() {
@@ -225,7 +345,7 @@ export default function App() {
   const globalBusy = initialLoading || syncing;
 
   return (
-    <main className="hud-shell">
+    <main className="app-shell">
       <header className="masthead">
         <div>
           <p className="eyebrow">Your work, at a glance</p>
@@ -240,25 +360,24 @@ export default function App() {
         </button>
       </header>
 
-      <nav className="tabs" aria-label="Work views">
-        {(["today", "inbox", "settings"] as const).map((name) => (
+      <nav className="tabs" aria-label="Glancelet sections">
+        {(["surface", "sources", "settings"] as const).map((name) => (
           <button
             key={name}
             className={tab === name ? "active" : ""}
             onClick={() => void selectTab(name)}
           >
-            {name === "today"
-              ? "Today"
-              : name === "inbox"
-                ? "Inbox"
-                : "Sources"}
-            {name !== "settings" && <span>{dashboard[name].length}</span>}
+            {name === "surface"
+              ? "Surface"
+              : name === "sources"
+                ? "Sources"
+                : "Settings"}
           </button>
         ))}
       </nav>
 
       {error && <p className="error-banner">{error}</p>}
-      {tab === "settings" ? (
+      {tab === "sources" ? (
         <div className="settings-stack">
           <SlackSettings
             busy={globalBusy || connectingSlack}
@@ -297,31 +416,71 @@ export default function App() {
             setError={setError}
           />
         </div>
+      ) : tab === "settings" ? (
+        <GeneralSettings
+          settings={desktopSettings}
+          update={updateDesktopSetting}
+        />
       ) : (
-        <section className="work-list" aria-live="polite">
-          {!initialLoading && dashboard[tab].length === 0 ? (
-            <div className="empty-state">
-              <span>All clear</span>
-              <p>
-                {tab === "today"
-                  ? "Nothing needs your attention today."
-                  : "Your inbox is empty."}
-              </p>
-            </div>
-          ) : (
-            dashboard[tab].map((work) => (
-              <WorkCard
-                key={work.id}
-                work={work}
-                pending={pendingWorkIds.has(work.id)}
-                run={run}
-                open={open}
-              />
-            ))
-          )}
-        </section>
+        <DesktopSurface
+          data={dashboard}
+          layout={layout}
+          loading={initialLoading}
+          editing={editingLayout}
+          pendingWorkIds={pendingWorkIds}
+          onEdit={setEditingLayout}
+          onLayout={saveLayout}
+          onRun={run}
+          onOpen={open}
+          onSources={() => void selectTab("sources")}
+        />
       )}
     </main>
+  );
+}
+
+function GeneralSettings({
+  settings,
+  update,
+}: {
+  settings: DesktopSettings;
+  update: (key: keyof DesktopSettings, enabled: boolean) => Promise<void>;
+}) {
+  return (
+    <section className="general-settings" aria-label="General settings">
+      <div>
+        <h2>Desktop</h2>
+        <p>Control how Glancelet stays available throughout your day.</p>
+      </div>
+      <label>
+        <span>
+          <strong>Always on Top</strong>
+          <small>Keep the Surface above other windows.</small>
+        </span>
+        <input
+          type="checkbox"
+          checked={settings.alwaysOnTop}
+          onChange={(event) => void update("alwaysOnTop", event.target.checked)}
+        />
+      </label>
+      <label>
+        <span>
+          <strong>Launch Glancelet at startup</strong>
+          <small>Opt in to opening Glancelet when you sign in.</small>
+        </span>
+        <input
+          type="checkbox"
+          checked={settings.launchAtStartup}
+          onChange={(event) =>
+            void update("launchAtStartup", event.target.checked)
+          }
+        />
+      </label>
+      <p className="tray-hint">
+        Closing the window hides Glancelet to the system tray. Use Quit from the
+        tray menu to exit.
+      </p>
+    </section>
   );
 }
 
@@ -825,116 +984,6 @@ function PropertySelect({
         ))}
       </select>
     </label>
-  );
-}
-
-function WorkCard({
-  work,
-  pending,
-  run,
-  open,
-}: {
-  work: WorkView;
-  pending: boolean;
-  run: (id: string, command: WorkCommand) => Promise<void>;
-  open: (id: string) => Promise<void>;
-}) {
-  const supports = (action: WorkAction) =>
-    work.availableActions.includes(action);
-  const today = localDateString(new Date());
-
-  return (
-    <article className={`work-card kind-${work.kind}`} aria-busy={pending}>
-      <button
-        className="work-main"
-        disabled={pending || !work.canNavigate}
-        onClick={() => void open(work.id)}
-      >
-        <span className="kind-mark" aria-hidden="true" />
-        <span className="work-copy">
-          <span className="work-meta">
-            {work.kind} · {work.source.configName}
-            <i
-              className={`freshness ${work.freshness}`}
-              title={work.freshness}
-            />
-          </span>
-          <strong>{work.title}</strong>
-          {work.summary && <small>{work.summary}</small>}
-        </span>
-        {work.canNavigate && <span className="open-arrow">↗</span>}
-      </button>
-      <div className="work-actions">
-        {supports("start_work") && (
-          <button
-            disabled={pending}
-            onClick={() => void run(work.id, { type: "start_work" })}
-          >
-            Start
-          </button>
-        )}
-        {supports("complete") && (
-          <button
-            disabled={pending}
-            onClick={() => void run(work.id, { type: "complete" })}
-          >
-            Complete
-          </button>
-        )}
-        {supports("move_to_backlog") && (
-          <button
-            disabled={pending}
-            onClick={() => void run(work.id, { type: "move_to_backlog" })}
-          >
-            Backlog
-          </button>
-        )}
-        {supports("plan") && (
-          <button
-            disabled={pending}
-            onClick={() => void run(work.id, { type: "plan", date: today })}
-          >
-            Today
-          </button>
-        )}
-        {supports("move_to_inbox") && work.planning?.type !== "inbox" && (
-          <button
-            disabled={pending}
-            onClick={() => void run(work.id, { type: "move_to_inbox" })}
-          >
-            Inbox
-          </button>
-        )}
-        {supports("snooze") && (
-          <button
-            disabled={pending}
-            onClick={() => {
-              const until = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-              void run(work.id, { type: "snooze", until });
-            }}
-          >
-            Snooze
-          </button>
-        )}
-        {supports("dismiss") && (
-          <button
-            disabled={pending}
-            onClick={() => void run(work.id, { type: "dismiss" })}
-          >
-            Dismiss
-          </button>
-        )}
-        <button
-          aria-label={work.pinned ? "Unpin" : "Pin"}
-          disabled={pending}
-          onClick={() =>
-            void run(work.id, { type: work.pinned ? "unpin" : "pin" })
-          }
-        >
-          {work.pinned ? "Pinned" : "Pin"}
-        </button>
-      </div>
-    </article>
   );
 }
 
