@@ -13,11 +13,7 @@
 
 </div>
 
-<!--
-  TODO: add a screenshot or short GIF of the Today / Inbox HUD here.
-  This is the highest-impact addition to this README — a desktop app that
-  cannot be seen is a desktop app that does not get tried.
--->
+<!-- Screenshot of the Today / Inbox HUD goes here. -->
 
 Glancelet pulls work out of the tools it already lives in — Slack, Notion, Google
 Calendar — and puts it into a presentation-safe desktop view you can keep on screen.
