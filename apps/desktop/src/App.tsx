@@ -4,6 +4,7 @@ import {
   glanceletApi,
   syncReportMessage,
   type GoogleConnection,
+  type GitlabConnection,
   type GithubConnection,
   type NotionConnection,
   type NotionDataSource,
@@ -20,6 +21,7 @@ import {
 } from "./api";
 import { GoogleSettings } from "./GoogleSettings";
 import { GithubSettings } from "./GithubSettings";
+import { GitlabSettings } from "./GitlabSettings";
 import { localDateString } from "./local-time";
 import "./styles.css";
 
@@ -41,6 +43,9 @@ export default function App() {
   >([]);
   const [githubConnections, setGithubConnections] = useState<
     GithubConnection[]
+  >([]);
+  const [gitlabConnections, setGitlabConnections] = useState<
+    GitlabConnection[]
   >([]);
   const [initialLoading, setInitialLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -102,6 +107,15 @@ export default function App() {
     }
   }, []);
 
+  const refreshGitlab = useCallback(async (clearError = true) => {
+    try {
+      if (clearError) setError(null);
+      setGitlabConnections((await glanceletApi.gitlabConnections()) ?? []);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }, []);
+
   const refreshSources = useCallback(
     async (clearError = true) => {
       await Promise.all([
@@ -109,9 +123,10 @@ export default function App() {
         refreshNotion(clearError),
         refreshGoogle(clearError),
         refreshGithub(clearError),
+        refreshGitlab(clearError),
       ]);
     },
-    [refreshGithub, refreshGoogle, refreshNotion, refreshSlack],
+    [refreshGithub, refreshGitlab, refreshGoogle, refreshNotion, refreshSlack],
   );
 
   useEffect(() => {
@@ -271,6 +286,13 @@ export default function App() {
             busy={globalBusy}
             connections={githubConnections}
             refresh={refreshGithub}
+            refreshWork={refresh}
+            setError={setError}
+          />
+          <GitlabSettings
+            busy={globalBusy}
+            connections={gitlabConnections}
+            refresh={refreshGitlab}
             refreshWork={refresh}
             setError={setError}
           />

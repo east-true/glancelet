@@ -16,7 +16,7 @@
 <!-- Screenshot of the Today / Inbox HUD goes here. -->
 
 Glancelet pulls work out of the tools it already lives in — Slack, Notion, Google
-Calendar, and GitHub — and puts it into a presentation-safe desktop view you can
+Calendar, GitHub, and GitLab — and puts it into a presentation-safe desktop view you can
 keep on screen.
 
 The original service always remains the source of truth. Glancelet does not try to
@@ -36,6 +36,7 @@ There is no Glancelet server.
 - **Notion data source tasks** — mirror tasks from a Notion data source, with your own property mapping.
 - **Google Calendar** — bring today's events into the same view.
 - **GitHub work sources** — follow review requests, assigned issues, and repository workflow failures.
+- **GitLab To-Dos** — follow pending personal attention from GitLab.com or a self-managed instance.
 - **Plan, snooze, pin, dismiss** — lightweight local disposition that never writes back to the provider.
 - **Presentation-safe boundary** — the HUD only ever receives a curated `WorkView`; credentials, raw provider payloads, and database layout never cross into the UI, and navigation targets are validated before the OS opens them.
 - **Extensible by design** — sources register through a single extension boundary, so official and fork-specific sources use the same path.
@@ -95,7 +96,7 @@ contains no provider-specific logic — that boundary is what makes a new source
 contained addition rather than a change to the core.
 
 ```text
-Slack / Notion / Google / GitHub source → SourceBatch → SourceEntity → durable SourceChange
+Slack / Notion / Google / GitHub / GitLab source → SourceBatch → SourceEntity → durable SourceChange
                              → WorkProjector → WorkEntry → WorkView → Today / Inbox HUD
 ```
 
@@ -111,10 +112,11 @@ history, and the omissions that were deliberate.
 | [Notion setup](docs/notion-development.md)                   | Notion PAT, task mapping, and manual E2E setup                        |
 | [Google Calendar setup](docs/google-calendar-development.md) | Google Desktop OAuth, calendar selection, and manual E2E setup        |
 | [GitHub setup](docs/github-development.md)                   | GitHub App Device Flow, permissions, source setup, and manual E2E     |
+| [GitLab setup](docs/gitlab-development.md)                   | GitLab.com Device Flow, self-managed PAT, and To-Dos manual E2E       |
 
 ## Repository layout
 
-- `crates/glancelet-core` — domain, application services, the extension boundary, the Slack/Notion/Google/GitHub sources, and the SQLite adapter
+- `crates/glancelet-core` — domain, application services, the extension boundary, the Slack/Notion/Google/GitHub/GitLab sources, and the SQLite adapter
 - `apps/desktop` — the React HUD and its thin Tauri command layer
 - `docs/` — architecture and per-source setup guides
 

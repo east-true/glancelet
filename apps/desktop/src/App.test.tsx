@@ -73,6 +73,7 @@ test("loads Slack settings through Tauri commands", async () => {
     .mockResolvedValueOnce([])
     .mockResolvedValueOnce([])
     .mockResolvedValueOnce([])
+    .mockResolvedValueOnce([])
     .mockResolvedValueOnce([]);
   render(<App />);
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("dashboard"));
@@ -83,10 +84,190 @@ test("loads Slack settings through Tauri commands", async () => {
   expect(mocks.invoke).toHaveBeenCalledWith("notion_connections");
   expect(mocks.invoke).toHaveBeenCalledWith("google_connections");
   expect(mocks.invoke).toHaveBeenCalledWith("github_connections");
+  expect(mocks.invoke).toHaveBeenCalledWith("gitlab_connections");
   expect(screen.getByText("No Slack workspace connected.")).toBeInTheDocument();
   expect(screen.getByText("No Notion account connected.")).toBeInTheDocument();
   expect(screen.getByText("No Google account connected.")).toBeInTheDocument();
   expect(screen.getByText("No GitHub account connected.")).toBeInTheDocument();
+  expect(screen.getByText("No GitLab account connected.")).toBeInTheDocument();
+});
+
+test("shows the GitLab Device Flow code without persisting it in the frontend", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard")
+      return Promise.resolve({ today: [], inbox: [] });
+    if (command.endsWith("_connections")) return Promise.resolve([]);
+    if (command === "start_gitlab_connection") {
+      return Promise.resolve({
+        sessionId: "gitlab-device-session",
+        userCode: "GLAB-1234",
+        verificationUri: "https://gitlab.com/oauth/device",
+        verificationUriComplete: null,
+        expiresAt: "2026-08-13T01:00:00Z",
+        retryAfterSeconds: 60,
+      });
+    }
+    return Promise.resolve(undefined);
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Connect GitLab.com" }),
+  );
+  expect(await screen.findByText("GLAB-1234")).toBeInTheDocument();
+  expect(
+    screen.getByText("https://gitlab.com/oauth/device"),
+  ).toBeInTheDocument();
+  expect(mocks.invoke).toHaveBeenCalledWith("start_gitlab_connection");
+});
+
+test("connects a self-managed GitLab PAT through the Tauri boundary", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard")
+      return Promise.resolve({ today: [], inbox: [] });
+    if (command.endsWith("_connections")) return Promise.resolve([]);
+    return Promise.resolve(undefined);
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.change(
+    await screen.findByRole("textbox", { name: "GitLab instance URL" }),
+    { target: { value: "https://gitlab.example.com" } },
+  );
+  fireEvent.change(screen.getByLabelText("GitLab Personal Access Token"), {
+    target: { value: "dummy-pat-from-user" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Connect self-managed" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("connect_gitlab_pat", {
+      instanceUrl: "https://gitlab.example.com",
+      token: "dummy-pat-from-user",
+    }),
+  );
+  expect(screen.getByLabelText("GitLab Personal Access Token")).toHaveValue("");
+});
+
+test("adds GitLab To-Dos under the existing instance-scoped Connection", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard")
+      return Promise.resolve({ today: [], inbox: [] });
+    if (
+      command === "slack_connections" ||
+      command === "notion_connections" ||
+      command === "google_connections" ||
+      command === "github_connections"
+    ) {
+      return Promise.resolve([]);
+    }
+    if (command === "gitlab_connections") {
+      return Promise.resolve([
+        {
+          connectionId: "gitlab-1",
+          username: "alice",
+          instanceOrigin: "https://gitlab.example.com",
+          instanceLabel: "gitlab.example.com",
+          authMode: "pat",
+          status: "connected",
+          source: null,
+        },
+      ]);
+    }
+    if (command === "save_gitlab_todos_source")
+      return Promise.resolve("gitlab-todos");
+    return Promise.resolve(undefined);
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Add GitLab To-Dos" }),
+  );
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("save_gitlab_todos_source", {
+      connectionId: "gitlab-1",
+    }),
+  );
+});
+
+test("runs the GitLab To-Dos source lifecycle through Tauri commands", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard")
+      return Promise.resolve({ today: [], inbox: [] });
+    if (
+      command === "slack_connections" ||
+      command === "notion_connections" ||
+      command === "google_connections" ||
+      command === "github_connections"
+    ) {
+      return Promise.resolve([]);
+    }
+    if (command === "gitlab_connections") {
+      return Promise.resolve([
+        {
+          connectionId: "gitlab-1",
+          username: "alice",
+          instanceOrigin: "https://gitlab.example.com",
+          instanceLabel: "gitlab.example.com",
+          authMode: "pat",
+          status: "connected",
+          source: {
+            sourceId: "gitlab-todos",
+            name: "GitLab To-Dos · gitlab.example.com",
+            enabled: true,
+            lastSync: "2026-08-13T00:00:00Z",
+            lastError: null,
+            authenticationRequired: false,
+          },
+        },
+      ]);
+    }
+    if (command === "sync_source") {
+      return Promise.resolve({
+        refreshRequired: false,
+        succeeded: [],
+        failed: [],
+        projectionFailures: [],
+      });
+    }
+    return Promise.resolve(undefined);
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  expect(
+    await screen.findByText("GitLab To-Dos · gitlab.example.com"),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Sync now" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("sync_source", {
+      sourceId: "gitlab-todos",
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Disable" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("update_gitlab_source", {
+      sourceId: "gitlab-todos",
+      enabled: false,
+    }),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Remove" })).toBeEnabled(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("remove_gitlab_source", {
+      sourceId: "gitlab-todos",
+    }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Disconnect GitLab" }),
+    ).toBeEnabled(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Disconnect GitLab" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("disconnect_gitlab", {
+      connectionId: "gitlab-1",
+    }),
+  );
 });
 
 test("shows the GitHub Device Flow code while authorization is pending", async () => {
