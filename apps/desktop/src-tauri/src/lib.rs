@@ -42,7 +42,6 @@ use glancelet_core::{
         PROVIDER_ID as SLACK_PROVIDER_ID, SOURCE_TYPE as SLACK_SOURCE_TYPE,
     },
     storage::{KeyringSecretStore, SqliteWorkStore},
-    GlanceletError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -125,14 +124,6 @@ impl SyncReport {
                 .map(|failure| format!("Projection: {failure}")),
         );
         (!failures.is_empty()).then(|| failures.join("; "))
-    }
-}
-
-fn sync_failure_kind(error: &GlanceletError) -> SourceFailureKind {
-    match error {
-        GlanceletError::AuthenticationRequired(_) => SourceFailureKind::AuthenticationRequired,
-        GlanceletError::RateLimited { .. } => SourceFailureKind::RateLimited,
-        _ => SourceFailureKind::Other,
     }
 }
 
@@ -288,7 +279,7 @@ impl AppServices {
                     .store
                     .source_runtime(&config.id)
                     .map_err(|error| error.to_string())?;
-                if runtime.authentication_required()
+                if runtime.automatic_retry_blocked()
                     || runtime
                         .next_sync_at
                         .is_some_and(|next_sync| next_sync > self.clock.now())
@@ -324,7 +315,7 @@ impl AppServices {
                     let kind = runtime
                         .as_ref()
                         .and_then(|runtime| runtime.failure_kind)
-                        .unwrap_or_else(|| sync_failure_kind(&error));
+                        .unwrap_or_else(|| SourceFailureKind::from(&error));
                     let next_retry_at = runtime.and_then(|runtime| runtime.next_sync_at);
                     report.failed.push(SyncSourceFailure {
                         source_id,
@@ -368,7 +359,7 @@ impl AppServices {
                 let kind = runtime
                     .as_ref()
                     .and_then(|runtime| runtime.failure_kind)
-                    .unwrap_or_else(|| sync_failure_kind(&error));
+                    .unwrap_or_else(|| SourceFailureKind::from(&error));
                 let next_retry_at = runtime.and_then(|runtime| runtime.next_sync_at);
                 report.failed.push(SyncSourceFailure {
                     source_id: source_id.into(),

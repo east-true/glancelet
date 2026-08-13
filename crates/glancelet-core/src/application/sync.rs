@@ -9,7 +9,11 @@ use tokio::{
 };
 
 const MAX_CONCURRENT_SYNCS: usize = 4;
-const PROJECTION_RETRY_DELAY_SECONDS: i64 = 300;
+const MIN_SYNC_RETRY_SECONDS: i64 = 30;
+const MAX_SYNC_RETRY_SECONDS: i64 = 6 * 60 * 60;
+const PROJECTION_RETRY_BASE_SECONDS: i64 = 5 * 60;
+const PROJECTION_RETRY_MAX_SECONDS: i64 = 6 * 60 * 60;
+const MAX_PROJECTION_ATTEMPTS: i64 = 5;
 
 use crate::{
     application::{Clock, SourceFailureKind, WorkStore},
@@ -79,23 +83,21 @@ impl SyncCoordinator {
             Ok(batch) => batch,
             Err(error) => {
                 let now = self.clock.now();
-                let next_retry_at = if matches!(error, GlanceletError::AuthenticationRequired(_)) {
-                    // Authentication cannot recover with time. A successful reconnect
-                    // explicitly resumes every SourceConfig for this Connection.
-                    None
-                } else {
-                    let retry_seconds = error
-                        .retry_after_seconds()
-                        .unwrap_or(config.expected_sync_interval_seconds)
-                        .max(1);
-                    Some(now + chrono::Duration::seconds(retry_seconds))
-                };
+                let kind = SourceFailureKind::from(&error);
+                let next_retry_at = retry_at(
+                    source_config_id,
+                    config.expected_sync_interval_seconds,
+                    runtime.failure_count + 1,
+                    kind,
+                    &error,
+                    now,
+                );
                 self.store.record_sync_failure(
                     source_config_id,
                     runtime.config_revision,
                     now,
                     next_retry_at,
-                    failure_kind(&error),
+                    kind,
                     &error.to_string(),
                 )?;
                 return Err(error);
@@ -141,12 +143,60 @@ impl SyncCoordinator {
     }
 }
 
-fn failure_kind(error: &GlanceletError) -> SourceFailureKind {
-    match error {
-        GlanceletError::AuthenticationRequired(_) => SourceFailureKind::AuthenticationRequired,
-        GlanceletError::RateLimited { .. } => SourceFailureKind::RateLimited,
-        _ => SourceFailureKind::Other,
+fn retry_at(
+    source_config_id: &str,
+    expected_interval_seconds: i64,
+    failure_count: i64,
+    kind: SourceFailureKind,
+    error: &GlanceletError,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    match kind {
+        SourceFailureKind::AuthenticationRequired | SourceFailureKind::ConfigurationRequired => {
+            None
+        }
+        SourceFailureKind::RateLimited => {
+            Some(now + chrono::Duration::seconds(error.retry_after_seconds().unwrap_or(60).max(1)))
+        }
+        SourceFailureKind::TransientNetwork
+        | SourceFailureKind::ProviderFailure
+        | SourceFailureKind::Other => Some(
+            now + chrono::Duration::seconds(exponential_retry_seconds(
+                source_config_id,
+                expected_interval_seconds,
+                failure_count,
+            )),
+        ),
     }
+}
+
+fn exponential_retry_seconds(
+    source_config_id: &str,
+    expected_interval_seconds: i64,
+    failure_count: i64,
+) -> i64 {
+    let base = expected_interval_seconds.clamp(MIN_SYNC_RETRY_SECONDS, MAX_SYNC_RETRY_SECONDS);
+    let exponent = (failure_count.saturating_sub(1)).clamp(0, 12) as u32;
+    let multiplier = 1_i64.checked_shl(exponent).unwrap_or(i64::MAX);
+    let without_jitter = base.saturating_mul(multiplier).min(MAX_SYNC_RETRY_SECONDS);
+    let jitter_window = (without_jitter / 5).max(1);
+    let jitter = deterministic_jitter(source_config_id, failure_count, jitter_window);
+    without_jitter
+        .saturating_add(jitter)
+        .min(MAX_SYNC_RETRY_SECONDS)
+}
+
+fn deterministic_jitter(source_config_id: &str, failure_count: i64, window: i64) -> i64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in source_config_id.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    for byte in failure_count.to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash % (window as u64 + 1)) as i64
 }
 
 #[derive(Debug, Default)]
@@ -225,29 +275,45 @@ impl SourceChangeProcessor {
             ..ProjectionDrainReport::default()
         };
         for change in changes {
+            let mut projector_version = 0;
             let result = (|| {
                 let config = self
                     .store
                     .source_config(&change.source_entity.source_config_id)?;
                 let projector = self.registry.projector(&config.source_type_id)?;
+                projector_version = projector.version();
                 let draft = projector.project(&change.source_entity, &change)?;
                 self.store
-                    .apply_projection(&change, &draft, projector.version(), self.clock.now())
+                    .apply_projection(&change, &draft, projector_version, self.clock.now())
             })();
             match result {
                 Ok(()) => report.processed += 1,
                 Err(error) => {
                     let message = error.to_string();
-                    let next_retry_at = self.clock.now()
-                        + chrono::Duration::seconds(PROJECTION_RETRY_DELAY_SECONDS);
-                    self.store.record_projection_failure(
+                    let state = self.store.record_projection_failure(
                         change.id,
-                        next_retry_at,
+                        projector_version,
+                        self.clock.now(),
+                        PROJECTION_RETRY_BASE_SECONDS,
+                        PROJECTION_RETRY_MAX_SECONDS,
+                        MAX_PROJECTION_ATTEMPTS,
                         &message.chars().take(1_000).collect::<String>(),
                     )?;
-                    report
-                        .failures
-                        .push(format!("change {}: {message}", change.id));
+                    if state.quarantined() {
+                        report.failures.push(format!(
+                            "change {} quarantined after {} projection attempts: {message}",
+                            change.id, state.failure_count
+                        ));
+                    } else {
+                        report.failures.push(format!(
+                            "change {} projection attempt {} failed; retry at {}: {message}",
+                            change.id,
+                            state.failure_count,
+                            state
+                                .next_retry_at
+                                .expect("non-quarantined projection failure has retry time")
+                        ));
+                    }
                 }
             }
         }
