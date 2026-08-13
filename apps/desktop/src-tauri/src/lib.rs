@@ -9,15 +9,17 @@ use std::{
 
 use chrono::{DateTime, NaiveDate, Utc};
 #[cfg(feature = "demo-sources")]
-use glancelet_core::sources::fake::{self, CAPTURE_SOURCE_TYPE, MIRROR_SOURCE_TYPE};
+use glancelet_core::sources::fake::{CAPTURE_SOURCE_TYPE, MIRROR_SOURCE_TYPE};
 use glancelet_core::{
     application::{
-        Clock, ConnectionCommandService, NavigationService, SecretStore, SourceChangeProcessor,
-        SourceFailureKind, SyncCoordinator, SystemClock, TimeContext, WorkCommandService,
-        WorkDashboard, WorkReadService, WorkStore,
+        Clock, ConnectionCommandService, DesktopPreferences, NavigationService, SecretStore,
+        SourceChangeProcessor, SourceFailureKind, SyncCoordinator, SystemClock, TimeContext,
+        WidgetInstance, WidgetLayoutService, WorkCommandService, WorkReadService, WorkStore,
+        WorkWidgets,
     },
     domain::{ProviderId, SourceTypeId},
     extension::{Connection, ExtensionRegistry, SourceConfig},
+    sources::fake,
     sources::github::{
         self, GithubApiClient, GithubDeviceAuthorization, GithubDeviceFlowService,
         GithubDevicePollResult, GithubRepository, GithubTokenProvider, GithubWorkflowSettings,
@@ -51,7 +53,12 @@ use glancelet_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{Emitter, Manager, State};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, State,
+};
+use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -63,12 +70,14 @@ use uuid::Uuid;
 const SLACK_REDIRECT_URI: &str = "http://localhost:42813/oauth/slack/callback";
 const SLACK_CALLBACK_ADDRESS: &str = "127.0.0.1:42813";
 const WORK_CHANGED_EVENT: &str = "glancelet://work-changed";
+const NAVIGATE_EVENT: &str = "glancelet://navigate";
 
 struct AppServices {
     store: Arc<SqliteWorkStore>,
     sync: Arc<SyncCoordinator>,
     changes: SourceChangeProcessor,
     reads: WorkReadService,
+    layouts: WidgetLayoutService,
     commands: WorkCommandService,
     connections: ConnectionCommandService,
     navigation: NavigationService,
@@ -150,7 +159,8 @@ impl AppServices {
         );
         let time_context = TimeContext::system().map_err(|error| error.to_string())?;
         let mut registry = ExtensionRegistry::new();
-        #[cfg(feature = "demo-sources")]
+        // Demo seeding remains opt-in, but the adapter stays registered so databases
+        // created by earlier development builds remain readable after restart.
         registry
             .register(fake::registration())
             .map_err(|error| error.to_string())?;
@@ -254,6 +264,7 @@ impl AppServices {
                 Arc::clone(&clock),
                 time_context,
             ),
+            layouts: WidgetLayoutService::new(Arc::clone(&store_port)),
             commands: WorkCommandService::new(Arc::clone(&store_port), Arc::clone(&clock)),
             connections: ConnectionCommandService::new(
                 Arc::clone(&store_port),
@@ -533,6 +544,13 @@ struct GitlabDevicePollView {
     retry_after_seconds: Option<i64>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopSettingsView {
+    always_on_top: bool,
+    launch_at_startup: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GoogleCalendarSelection {
@@ -554,11 +572,76 @@ enum WorkCommand {
 }
 
 #[tauri::command]
-fn dashboard(services: State<'_, Arc<AppServices>>) -> Result<WorkDashboard, String> {
+fn dashboard(services: State<'_, Arc<AppServices>>) -> Result<WorkWidgets, String> {
+    services.reads.widgets(7).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn widget_layout(services: State<'_, Arc<AppServices>>) -> Result<Vec<WidgetInstance>, String> {
+    services.layouts.layout().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_widget_layout(
+    services: State<'_, Arc<AppServices>>,
+    widgets: Vec<WidgetInstance>,
+) -> Result<(), String> {
     services
-        .reads
-        .dashboard()
+        .layouts
+        .save(&widgets)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn desktop_settings(
+    app: tauri::AppHandle,
+    services: State<'_, Arc<AppServices>>,
+) -> Result<DesktopSettingsView, String> {
+    let preferences = services
+        .layouts
+        .preferences()
+        .map_err(|error| error.to_string())?;
+    let launch_at_startup = app
+        .autolaunch()
+        .is_enabled()
+        .map_err(|_| "Could not read the launch-at-startup setting".to_owned())?;
+    Ok(DesktopSettingsView {
+        always_on_top: preferences.always_on_top,
+        launch_at_startup,
+    })
+}
+
+#[tauri::command]
+fn set_always_on_top(
+    window: tauri::WebviewWindow,
+    services: State<'_, Arc<AppServices>>,
+    enabled: bool,
+) -> Result<DesktopPreferences, String> {
+    let previous = services
+        .layouts
+        .preferences()
+        .map_err(|error| error.to_string())?;
+    window
+        .set_always_on_top(enabled)
+        .map_err(|_| "Could not update Always on Top".to_owned())?;
+    match services.layouts.set_always_on_top(enabled) {
+        Ok(preferences) => Ok(preferences),
+        Err(error) => {
+            let _ = window.set_always_on_top(previous.always_on_top);
+            Err(error.to_string())
+        }
+    }
+}
+
+#[tauri::command]
+fn set_launch_at_startup(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable()
+    } else {
+        manager.disable()
+    }
+    .map_err(|_| "Could not update the launch-at-startup setting".to_owned())
 }
 
 #[tauri::command]
@@ -1868,6 +1951,182 @@ fn open_source(
         .map_err(|error| error.to_string())
 }
 
+fn show_main_window(app: &tauri::AppHandle, destination: Option<&str>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        if let Some(destination) = destination {
+            let _ = app.emit(NAVIGATE_EVENT, destination);
+        }
+    }
+}
+
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "Show Glancelet", true, None::<&str>)?;
+    let hide = MenuItem::with_id(app, "hide", "Hide Glancelet", true, None::<&str>)?;
+    let always = MenuItem::with_id(
+        app,
+        "always_on_top",
+        "Toggle Always on Top",
+        true,
+        None::<&str>,
+    )?;
+    let sources = MenuItem::with_id(app, "sources", "Sources", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &hide, &always, &sources, &settings, &quit])?;
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| tauri::Error::AssetNotFound("default window icon".into()))?;
+    TrayIconBuilder::with_id("glancelet-tray")
+        .icon(icon)
+        .tooltip("Glancelet")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(move |app, event| match event.id.as_ref() {
+            "show" => show_main_window(app, None),
+            "hide" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+            "sources" => show_main_window(app, Some("sources")),
+            "settings" => show_main_window(app, Some("settings")),
+            "always_on_top" => {
+                let services = app.state::<Arc<AppServices>>();
+                if let Ok(preferences) = services.layouts.preferences() {
+                    let current = preferences.always_on_top;
+                    let next = !current;
+                    if let Some(window) = app.get_webview_window("main") {
+                        if window.set_always_on_top(next).is_ok() {
+                            if services.layouts.set_always_on_top(next).is_ok() {
+                                let _ = app.emit("glancelet://desktop-settings-changed", ());
+                            } else {
+                                let _ = window.set_always_on_top(current);
+                            }
+                        }
+                    }
+                }
+            }
+            "quit" => {
+                app.state::<Arc<AppServices>>()
+                    .stopping
+                    .store(true, Ordering::Relaxed);
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            ) {
+                show_main_window(tray.app_handle(), None);
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WindowBounds {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+fn recovered_geometry(window: WindowBounds, monitors: &[WindowBounds]) -> Option<WindowBounds> {
+    if monitors.is_empty() {
+        return None;
+    }
+    let intersection_area = |monitor: &WindowBounds| {
+        let left = window.x.max(monitor.x);
+        let top = window.y.max(monitor.y);
+        let right = (window.x + window.width as i32).min(monitor.x + monitor.width as i32);
+        let bottom = (window.y + window.height as i32).min(monitor.y + monitor.height as i32);
+        (right - left).max(0) as u64 * (bottom - top).max(0) as u64
+    };
+    // Callers put the primary monitor first. Preserve that fallback when the
+    // saved window is completely off-screen, while preferring any monitor with
+    // a larger visible intersection.
+    let target = monitors
+        .iter()
+        .copied()
+        .reduce(|best, candidate| {
+            if intersection_area(&candidate) > intersection_area(&best) {
+                candidate
+            } else {
+                best
+            }
+        })
+        .unwrap_or(monitors[0]);
+    let width = window.width.min(target.width);
+    let height = window.height.min(target.height);
+    let max_x = target.x + target.width.saturating_sub(width) as i32;
+    let max_y = target.y + target.height.saturating_sub(height) as i32;
+    let recovered = WindowBounds {
+        x: window.x.clamp(target.x, max_x),
+        y: window.y.clamp(target.y, max_y),
+        width,
+        height,
+    };
+    (recovered != window).then_some(recovered)
+}
+
+fn recover_window_to_visible_monitor(window: &tauri::WebviewWindow) {
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let Ok(monitors) = window.available_monitors() else {
+        return;
+    };
+    let primary = window
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|monitor| WindowBounds {
+            x: monitor.position().x,
+            y: monitor.position().y,
+            width: monitor.size().width,
+            height: monitor.size().height,
+        });
+    let mut bounds = monitors
+        .iter()
+        .map(|monitor| WindowBounds {
+            x: monitor.position().x,
+            y: monitor.position().y,
+            width: monitor.size().width,
+            height: monitor.size().height,
+        })
+        .collect::<Vec<_>>();
+    if let Some(primary) = primary {
+        bounds.retain(|monitor| *monitor != primary);
+        bounds.insert(0, primary);
+    }
+    if let Some(recovered) = recovered_geometry(
+        WindowBounds {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+        },
+        &bounds,
+    ) {
+        let _ = window.set_size(tauri::PhysicalSize::new(recovered.width, recovered.height));
+        let _ = window.set_position(tauri::PhysicalPosition::new(recovered.x, recovered.y));
+    }
+}
+
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
@@ -1876,9 +2135,31 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::SIZE,
+                )
+                .build(),
+        )
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let services = AppServices::initialize(app).map_err(std::io::Error::other)?;
+            let preferences = services
+                .layouts
+                .preferences()
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if let Some(window) = app.get_webview_window("main") {
+                recover_window_to_visible_monitor(&window);
+                window
+                    .set_always_on_top(preferences.always_on_top)
+                    .map_err(std::io::Error::other)?;
+            }
             let scheduler_services = Arc::clone(&services);
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -1898,10 +2179,22 @@ pub fn run() {
                 }
             });
             app.manage(services);
+            setup_tray(app)?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             dashboard,
+            widget_layout,
+            save_widget_layout,
+            desktop_settings,
+            set_always_on_top,
+            set_launch_at_startup,
             sync_all,
             slack_connections,
             connect_slack,
@@ -1951,10 +2244,7 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build Glancelet")
         .run(|app, event| {
-            if matches!(
-                event,
-                tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
-            ) {
+            if matches!(event, tauri::RunEvent::Exit) {
                 app.state::<Arc<AppServices>>()
                     .stopping
                     .store(true, Ordering::Relaxed);
@@ -2342,4 +2632,103 @@ fn seed_fake_sources(store: &SqliteWorkStore) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod desktop_window_tests {
+    use super::{recovered_geometry, WindowBounds};
+
+    #[test]
+    fn offscreen_geometry_recovers_to_a_visible_monitor() {
+        let monitor = WindowBounds {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        assert_eq!(
+            recovered_geometry(
+                WindowBounds {
+                    x: 4000,
+                    y: 2000,
+                    width: 520,
+                    height: 720,
+                },
+                &[monitor],
+            ),
+            Some(WindowBounds {
+                x: 1400,
+                y: 360,
+                width: 520,
+                height: 720,
+            })
+        );
+        assert_eq!(
+            recovered_geometry(
+                WindowBounds {
+                    x: 100,
+                    y: 100,
+                    width: 520,
+                    height: 720,
+                },
+                &[monitor],
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn oversized_geometry_is_clamped_to_the_available_monitor() {
+        let monitor = WindowBounds {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        assert_eq!(
+            recovered_geometry(
+                WindowBounds {
+                    x: -400,
+                    y: -200,
+                    width: 2500,
+                    height: 1400,
+                },
+                &[monitor],
+            ),
+            Some(monitor)
+        );
+    }
+
+    #[test]
+    fn fully_offscreen_geometry_uses_the_first_monitor_as_fallback() {
+        let primary = WindowBounds {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let secondary = WindowBounds {
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        assert_eq!(
+            recovered_geometry(
+                WindowBounds {
+                    x: 8000,
+                    y: 4000,
+                    width: 520,
+                    height: 720,
+                },
+                &[primary, secondary],
+            ),
+            Some(WindowBounds {
+                x: 1400,
+                y: 360,
+                width: 520,
+                height: 720,
+            })
+        );
+    }
 }

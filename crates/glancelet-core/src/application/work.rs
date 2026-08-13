@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, Days, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -78,6 +78,47 @@ pub struct WorkDashboard {
     pub inbox: Vec<WorkView>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpcomingBasis {
+    Event,
+    Planned,
+    Due,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpcomingWorkView {
+    pub date: NaiveDate,
+    pub basis: UpcomingBasis,
+    pub work: WorkView,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceHealthIssue {
+    pub source_id: String,
+    pub source_name: String,
+    pub kind: super::SourceFailureKind,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceHealthView {
+    pub source_count: usize,
+    pub issues: Vec<SourceHealthIssue>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkWidgets {
+    pub today: Vec<WorkView>,
+    pub inbox: Vec<WorkView>,
+    pub upcoming: Vec<UpcomingWorkView>,
+    pub attention: Vec<WorkView>,
+    pub source_health: SourceHealthView,
+}
+
 pub struct WorkReadService {
     store: Arc<dyn WorkStore>,
     registry: Arc<ExtensionRegistry>,
@@ -101,10 +142,20 @@ impl WorkReadService {
     }
 
     pub fn dashboard(&self) -> Result<WorkDashboard> {
+        let widgets = self.widgets(7)?;
+        Ok(WorkDashboard {
+            today: widgets.today,
+            inbox: widgets.inbox,
+        })
+    }
+
+    pub fn widgets(&self, upcoming_days: u64) -> Result<WorkWidgets> {
         let now = self.clock.now();
         let today = self.time_context.local_date(now);
         let mut today_items = Vec::new();
         let mut inbox_items = Vec::new();
+        let mut upcoming_items = Vec::new();
+        let mut attention_items = Vec::new();
 
         for stored in self.store.dashboard_work(now)? {
             if !is_visible(&stored, now) {
@@ -113,20 +164,63 @@ impl WorkReadService {
             let is_today = belongs_to_today(&stored, today, self.time_context);
             let is_inbox = stored.entry.kind == WorkKind::Action
                 && stored.entry.planning == Some(WorkPlanning::Inbox);
+            let upcoming = upcoming_entries(&stored, today, upcoming_days, self.time_context);
+            let is_attention = stored.entry.kind == WorkKind::Attention;
             let view = self.to_view(stored, now)?;
             if is_today {
                 today_items.push(view.clone());
             }
             if is_inbox {
-                inbox_items.push(view);
+                inbox_items.push(view.clone());
+            }
+            if is_attention {
+                attention_items.push(view.clone());
+            }
+            for (date, basis) in upcoming {
+                upcoming_items.push(UpcomingWorkView {
+                    date,
+                    basis,
+                    work: view.clone(),
+                });
             }
         }
 
         sort_views(&mut today_items);
         sort_views(&mut inbox_items);
-        Ok(WorkDashboard {
+        sort_views(&mut attention_items);
+        upcoming_items.sort_by(|a, b| {
+            a.date
+                .cmp(&b.date)
+                .then_with(|| upcoming_rank(a.basis).cmp(&upcoming_rank(b.basis)))
+                .then_with(|| a.work.title.cmp(&b.work.title))
+        });
+
+        let mut issues = Vec::new();
+        let source_configs = self.store.source_configs()?;
+        let active_sources = source_configs
+            .into_iter()
+            .filter(|source| source.enabled && source.removed_at.is_none())
+            .collect::<Vec<_>>();
+        for source in &active_sources {
+            let runtime = self.store.source_runtime(&source.id)?;
+            if let Some(kind) = runtime.failure_kind {
+                issues.push(SourceHealthIssue {
+                    source_id: source.id.clone(),
+                    source_name: source.display_name.clone(),
+                    kind,
+                });
+            }
+        }
+
+        Ok(WorkWidgets {
             today: today_items,
             inbox: inbox_items,
+            upcoming: upcoming_items,
+            attention: attention_items,
+            source_health: SourceHealthView {
+                source_count: active_sources.len(),
+                issues,
+            },
         })
     }
 
@@ -209,6 +303,73 @@ impl WorkReadService {
             facets: stored.entry.facets,
             available_actions: actions,
         })
+    }
+}
+
+fn upcoming_entries(
+    stored: &StoredWork,
+    today: NaiveDate,
+    days: u64,
+    time_context: TimeContext,
+) -> Vec<(NaiveDate, UpcomingBasis)> {
+    if days == 0 || stored.entry.kind == WorkKind::Attention {
+        return Vec::new();
+    }
+    let Some(first) = today.checked_add_days(Days::new(1)) else {
+        return Vec::new();
+    };
+    let Some(last) = today.checked_add_days(Days::new(days)) else {
+        return Vec::new();
+    };
+    let in_range = |date: NaiveDate| first <= date && date <= last;
+    let mut entries = Vec::new();
+
+    if stored.entry.kind == WorkKind::Event {
+        if let Some(date) = (0..days)
+            .filter_map(|offset| first.checked_add_days(Days::new(offset)))
+            .find(|date| {
+                event_overlaps_today(
+                    stored.entry.start.as_ref(),
+                    stored.entry.end.as_ref(),
+                    *date,
+                    time_context,
+                )
+            })
+        {
+            entries.push((date, UpcomingBasis::Event));
+        }
+    }
+
+    if let Some(WorkPlanning::Planned(date)) = stored.entry.planning {
+        if in_range(date) {
+            entries.push((date, UpcomingBasis::Planned));
+        }
+    }
+    if let Some(date) = stored
+        .entry
+        .due
+        .as_ref()
+        .and_then(|value| temporal_local_date(value, time_context))
+    {
+        if in_range(date) {
+            entries.push((date, UpcomingBasis::Due));
+        }
+    }
+    entries
+}
+
+fn temporal_local_date(value: &TemporalValue, time_context: TimeContext) -> Option<NaiveDate> {
+    match value {
+        TemporalValue::Date { date } => Some(*date),
+        TemporalValue::DateTime { instant, .. } => Some(time_context.local_date(*instant)),
+    }
+}
+
+fn upcoming_rank(basis: UpcomingBasis) -> u8 {
+    match basis {
+        UpcomingBasis::Event => 0,
+        UpcomingBasis::Planned => 1,
+        UpcomingBasis::Due => 2,
     }
 }
 

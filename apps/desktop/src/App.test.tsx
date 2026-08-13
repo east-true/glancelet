@@ -58,7 +58,7 @@ test("renders the presentation-safe WorkView returned by the application", async
   await waitFor(() =>
     expect(screen.getByText("Review failed build")).toBeInTheDocument(),
   );
-  expect(screen.getByText(/attention · Backend/)).toBeInTheDocument();
+  expect(screen.getByText("Backend")).toBeInTheDocument();
   expect(mocks.invoke).toHaveBeenCalledWith("dashboard");
 });
 
@@ -655,8 +655,8 @@ test("refreshes the HUD when the backend invalidates work", async () => {
   let invalidate: (() => void) | undefined;
   let dashboardCalls = 0;
   mocks.listen.mockImplementation(
-    async (_event: string, handler: () => void) => {
-      invalidate = handler;
+    async (event: string, handler: () => void) => {
+      if (event === "glancelet://work-changed") invalidate = handler;
       return () => undefined;
     },
   );
@@ -815,8 +815,8 @@ test("ignores an older dashboard response that finishes last", async () => {
   const newer = deferred<ReturnType<typeof dashboardWith>>();
   let dashboardCalls = 0;
   mocks.listen.mockImplementation(
-    async (_event: string, handler: () => void) => {
-      invalidate = handler;
+    async (event: string, handler: () => void) => {
+      if (event === "glancelet://work-changed") invalidate = handler;
       return () => undefined;
     },
   );
@@ -850,8 +850,8 @@ test("keeps manual sync busy while a background refresh completes", async () => 
   }>();
   let dashboardCalls = 0;
   mocks.listen.mockImplementation(
-    async (_event: string, handler: () => void) => {
-      invalidate = handler;
+    async (event: string, handler: () => void) => {
+      if (event === "glancelet://work-changed") invalidate = handler;
       return () => undefined;
     },
   );
@@ -958,7 +958,7 @@ test("refreshes the HUD after a Slack source sync", async () => {
   fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
   await screen.findByText("Example workspace");
   fireEvent.click(screen.getByRole("button", { name: "Sync now" }));
-  fireEvent.click(screen.getByRole("button", { name: /^Today/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Surface" }));
 
   await screen.findByText("Captured after Slack sync");
   expect(mocks.invoke).toHaveBeenCalledWith("sync_source", {
@@ -991,6 +991,78 @@ test("does not hide a dashboard refresh failure after sync", async () => {
 
   await screen.findByText(/dashboard refresh failed/);
   expect(screen.getByRole("button", { name: "Sync" })).toBeEnabled();
+});
+
+test("persists opt-in desktop settings through Tauri commands", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard")
+      return Promise.resolve({ today: [], inbox: [] });
+    if (command === "widget_layout") return Promise.resolve(undefined);
+    if (command === "desktop_settings") {
+      return Promise.resolve({ alwaysOnTop: false, launchAtStartup: false });
+    }
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  const always = await screen.findByRole("checkbox", { name: /Always on Top/ });
+  const autostart = screen.getByRole("checkbox", {
+    name: /Launch Glancelet at startup/,
+  });
+  fireEvent.click(always);
+  fireEvent.click(autostart);
+  await waitFor(() => {
+    expect(mocks.invoke).toHaveBeenCalledWith("set_always_on_top", {
+      enabled: true,
+    });
+    expect(mocks.invoke).toHaveBeenCalledWith("set_launch_at_startup", {
+      enabled: true,
+    });
+  });
+  expect(
+    screen.getByText(/Closing the window hides Glancelet/),
+  ).toBeInTheDocument();
+});
+
+test("persists Widget additions through the layout command", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard")
+      return Promise.resolve({ today: [], inbox: [] });
+    if (command === "widget_layout") {
+      return Promise.resolve([
+        { widgetType: "today", position: 0, size: "wide", settings: {} },
+        {
+          widgetType: "inbox",
+          position: 1,
+          size: "compact",
+          settings: {},
+        },
+        {
+          widgetType: "attention",
+          position: 2,
+          size: "compact",
+          settings: {},
+        },
+      ]);
+    }
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Edit Layout" }));
+  fireEvent.click(screen.getByRole("button", { name: /Upcoming.*Add/ }));
+
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "save_widget_layout",
+      expect.objectContaining({
+        widgets: expect.arrayContaining([
+          expect.objectContaining({ widgetType: "upcoming", position: 3 }),
+        ]),
+      }),
+    ),
+  );
 });
 
 function deferred<T>() {

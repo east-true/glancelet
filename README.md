@@ -13,7 +13,7 @@
 
 </div>
 
-<!-- Screenshot of the Today / Inbox HUD goes here. -->
+<!-- Representative Desktop Surface screenshot goes here after manual visual validation. -->
 
 Glancelet pulls work out of the tools it already lives in — Slack, Notion, Google
 Calendar, GitHub, and GitLab — and puts it into a presentation-safe desktop view you can
@@ -31,7 +31,7 @@ There is no Glancelet server.
 
 ## Features
 
-- **Today / Inbox HUD** — one surface for what needs attention now, and what is waiting.
+- **Desktop Work Surface** — configurable Today, Inbox, Upcoming, and Attention Widgets in one compact window.
 - **Slack reaction capture** — react to a message to capture it as work.
 - **Notion data source tasks** — mirror tasks from a Notion data source, with your own property mapping.
 - **Google Calendar** — bring today's events into the same view.
@@ -97,7 +97,7 @@ contained addition rather than a change to the core.
 
 ```text
 Slack / Notion / Google / GitHub / GitLab source → SourceBatch → SourceEntity → durable SourceChange
-                             → WorkProjector → WorkEntry → WorkView → Today / Inbox HUD
+                             → WorkProjector → WorkEntry → WorkView → built-in Widgets
 ```
 
 [`docs/architecture.md`](docs/architecture.md) covers the boundaries, the migration

@@ -10,8 +10,8 @@ pub use secrets::*;
 
 use crate::{
     application::{
-        ProjectionFailureState, SourceFailureKind, SourceRuntime, StoredWork, WorkMutation,
-        WorkStore,
+        default_widget_layout, DesktopPreferences, ProjectionFailureState, SourceFailureKind,
+        SourceRuntime, StoredWork, WidgetInstance, WorkMutation, WorkStore,
     },
     domain::{
         LocalDisposition, ProgressAuthority, ProviderId, SourceBatch, SourceBatchKind,
@@ -395,6 +395,52 @@ impl SqliteWorkStore {
                 .execute(
                     "INSERT INTO schema_migrations(version, name)
                      VALUES (6, '006_drop_unused_projection_indexes')",
+                    [],
+                )
+                .map_err(storage_error)?;
+        }
+        let widget_layout_applied = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=7)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(storage_error)?;
+        if !widget_layout_applied {
+            transaction
+                .execute_batch(
+                    "CREATE TABLE IF NOT EXISTS widget_instances (
+                       widget_type TEXT PRIMARY KEY,
+                       position INTEGER NOT NULL UNIQUE,
+                       size TEXT NOT NULL,
+                       settings_json TEXT NOT NULL
+                     );
+                     CREATE TABLE IF NOT EXISTS desktop_preferences (
+                       id INTEGER PRIMARY KEY CHECK (id=1),
+                       always_on_top INTEGER NOT NULL
+                     );
+                     INSERT OR IGNORE INTO desktop_preferences(id, always_on_top) VALUES (1, 0);",
+                )
+                .map_err(storage_error)?;
+            for widget in default_widget_layout() {
+                transaction
+                    .execute(
+                        "INSERT OR IGNORE INTO widget_instances(
+                           widget_type, position, size, settings_json
+                         ) VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            json(&widget.widget_type)?,
+                            widget.position,
+                            json(&widget.size)?,
+                            json(&widget.settings)?
+                        ],
+                    )
+                    .map_err(storage_error)?;
+            }
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version, name)
+                     VALUES (7, '007_widget_layout')",
                     [],
                 )
                 .map_err(storage_error)?;
@@ -1063,6 +1109,102 @@ impl WorkStore for SqliteWorkStore {
             )
             .map_err(storage_error)?;
         rows.map(|row| row.map_err(storage_error)).collect()
+    }
+
+    fn widget_layout(&self) -> Result<Vec<WidgetInstance>> {
+        let connection = self.connection.lock().expect("sqlite connection poisoned");
+        let mut statement = connection
+            .prepare(
+                "SELECT widget_type, position, size, settings_json
+                 FROM widget_instances ORDER BY position",
+            )
+            .map_err(storage_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(storage_error)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)?;
+        if rows.is_empty() {
+            return Ok(default_widget_layout());
+        }
+        let mut widgets = Vec::with_capacity(rows.len());
+        for (widget_type, position, size, settings) in rows {
+            let parsed = (|| {
+                let settings = parse_json::<serde_json::Value>(&settings)?;
+                if position < 0 || !settings.is_object() {
+                    return Err(GlanceletError::Storage("invalid widget layout row".into()));
+                }
+                Ok(WidgetInstance {
+                    widget_type: parse_json(&widget_type)?,
+                    position,
+                    size: parse_json(&size)?,
+                    settings,
+                })
+            })();
+            match parsed {
+                Ok(widget) => widgets.push(widget),
+                Err(_) => return Ok(default_widget_layout()),
+            }
+        }
+        Ok(widgets)
+    }
+
+    fn save_widget_layout(&self, widgets: &[WidgetInstance]) -> Result<()> {
+        let mut connection = self.connection.lock().expect("sqlite connection poisoned");
+        let transaction = connection.transaction().map_err(storage_error)?;
+        transaction
+            .execute("DELETE FROM widget_instances", [])
+            .map_err(storage_error)?;
+        for widget in widgets {
+            transaction
+                .execute(
+                    "INSERT INTO widget_instances(widget_type, position, size, settings_json)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        json(&widget.widget_type)?,
+                        widget.position,
+                        json(&widget.size)?,
+                        json(&widget.settings)?
+                    ],
+                )
+                .map_err(storage_error)?;
+        }
+        transaction.commit().map_err(storage_error)
+    }
+
+    fn desktop_preferences(&self) -> Result<DesktopPreferences> {
+        self.connection
+            .lock()
+            .expect("sqlite connection poisoned")
+            .query_row(
+                "SELECT always_on_top FROM desktop_preferences WHERE id=1",
+                [],
+                |row| {
+                    Ok(DesktopPreferences {
+                        always_on_top: row.get(0)?,
+                    })
+                },
+            )
+            .map_err(storage_error)
+    }
+
+    fn save_desktop_preferences(&self, preferences: &DesktopPreferences) -> Result<()> {
+        self.connection
+            .lock()
+            .expect("sqlite connection poisoned")
+            .execute(
+                "UPDATE desktop_preferences SET always_on_top=?1 WHERE id=1",
+                [preferences.always_on_top],
+            )
+            .map(|_| ())
+            .map_err(storage_error)
     }
 
     fn stored_work_by_id(&self, id: &str) -> Result<StoredWork> {
