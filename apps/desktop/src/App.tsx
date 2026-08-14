@@ -66,6 +66,10 @@ export default function App() {
   const [dashboard, setDashboard] = useState(emptyDashboard);
   const [tab, setTab] = useState<Tab>("surface");
   const [layout, setLayout] = useState<WidgetInstance[]>(defaultLayout);
+  const [layoutReady, setLayoutReady] = useState(false);
+  const persistedLayoutRef = useRef<WidgetInstance[]>(defaultLayout);
+  const layoutSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const layoutSaveRequestRef = useRef(0);
   const [editingLayout, setEditingLayout] = useState(false);
   const [desktopSettings, setDesktopSettings] = useState<DesktopSettings>({
     alwaysOnTop: false,
@@ -195,14 +199,19 @@ export default function App() {
     const initialRefresh = window.setTimeout(() => {
       void refresh();
       void Promise.resolve(glanceletApi.widgetLayout())
-        .then((widgets) =>
-          setLayout(
+        .then((widgets) => {
+          if (disposed) return;
+          const initialLayout =
             Array.isArray(widgets) && widgets.length > 0
               ? widgets
-              : defaultLayout,
-          ),
-        )
-        .catch((reason) => setError(String(reason)));
+              : defaultLayout;
+          persistedLayoutRef.current = initialLayout;
+          setLayout(initialLayout);
+          setLayoutReady(true);
+        })
+        .catch((reason) => {
+          if (!disposed) setError(String(reason));
+        });
     }, 0);
     return () => {
       disposed = true;
@@ -285,16 +294,24 @@ export default function App() {
     }
   }
 
-  async function saveLayout(next: WidgetInstance[]) {
-    const previous = layout;
+  function saveLayout(next: WidgetInstance[]) {
+    const request = ++layoutSaveRequestRef.current;
     setLayout(next);
-    try {
-      setError(null);
-      await glanceletApi.saveWidgetLayout(next);
-    } catch (reason) {
-      setLayout(previous);
-      setError(String(reason));
-    }
+    setError(null);
+
+    const save = layoutSaveQueueRef.current.then(async () => {
+      try {
+        await glanceletApi.saveWidgetLayout(next);
+        persistedLayoutRef.current = next;
+      } catch (reason) {
+        if (request === layoutSaveRequestRef.current) {
+          setLayout(persistedLayoutRef.current);
+          setError(String(reason));
+        }
+      }
+    });
+    layoutSaveQueueRef.current = save;
+    return save;
   }
 
   async function updateDesktopSetting(
@@ -370,6 +387,7 @@ export default function App() {
           aria-label={editingLayout ? "Done editing layout" : "Edit layout"}
           aria-pressed={editingLayout}
           title={editingLayout ? "Done editing layout" : "Edit layout"}
+          disabled={!layoutReady}
           onClick={() => setEditingLayout(!editingLayout)}
         >
           <svg
