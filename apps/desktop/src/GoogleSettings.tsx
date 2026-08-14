@@ -146,11 +146,7 @@ function GoogleConnectionCard({
 
   async function addSelectedCalendars() {
     const saved = await act(
-      () =>
-        glanceletApi.saveGoogleCalendars(
-          connection.connectionId,
-          selected,
-        ),
+      () => glanceletApi.saveGoogleCalendars(connection.connectionId, selected),
       true,
     );
     if (saved) setSelected([]);
