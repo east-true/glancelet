@@ -1,4 +1,11 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "./App";
 
@@ -26,7 +33,8 @@ function deferred<T>() {
 test("rolls back only the desktop setting whose save fails", async () => {
   const alwaysOnTop = deferred<void>();
   mocks.invoke.mockImplementation((command: string) => {
-    if (command === "dashboard") return Promise.resolve({ today: [], inbox: [] });
+    if (command === "dashboard")
+      return Promise.resolve({ today: [], inbox: [] });
     if (command === "widget_layout") return Promise.resolve(undefined);
     if (
       command === "slack_connections" ||
@@ -50,7 +58,9 @@ test("rolls back only the desktop setting whose save fails", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
   fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
 
-  const always = await screen.findByRole("checkbox", { name: /Always on Top/ });
+  const always = await screen.findByRole("checkbox", {
+    name: /Always on Top/,
+  });
   const autostart = screen.getByRole("checkbox", {
     name: /Launch Glancelet at startup/,
   });
@@ -60,7 +70,9 @@ test("rolls back only the desktop setting whose save fails", async () => {
   expect(always).toBeDisabled();
   fireEvent.click(always);
   expect(
-    mocks.invoke.mock.calls.filter(([command]) => command === "set_always_on_top"),
+    mocks.invoke.mock.calls.filter(
+      ([command]) => command === "set_always_on_top",
+    ),
   ).toHaveLength(1);
 
   fireEvent.click(autostart);
