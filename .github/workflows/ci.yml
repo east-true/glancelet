@@ -125,11 +125,6 @@ jobs:
           cache: npm
       - name: Install frontend dependencies
         run: npm ci
-      - name: Diagnose integration test formatting
-        run: |
-          npx prettier --write apps/desktop/src/ConnectionRefreshIntegration.test.tsx
-          git diff -- apps/desktop/src/ConnectionRefreshIntegration.test.tsx
-          exit 1
       - name: Check frontend formatting
         run: npm run format:check
       - name: Lint frontend
