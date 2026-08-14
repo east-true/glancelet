@@ -1,66 +1,130 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { expect, test, vi } from "vitest";
-import { DesktopSurface } from "./DesktopSurface";
-import type { WidgetInstance, WorkDashboard } from "./api";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import App from "./App";
+import type { WidgetInstance } from "./api";
 
-const layout: WidgetInstance[] = [
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
+
+const initialLayout: WidgetInstance[] = [
   { widgetType: "today", position: 0, size: "wide", settings: {} },
   { widgetType: "inbox", position: 1, size: "compact", settings: {} },
   { widgetType: "attention", position: 2, size: "compact", settings: {} },
 ];
 
-const data: WorkDashboard = {
-  today: [],
-  inbox: [],
-  upcoming: [],
-  attention: [],
-  sourceHealth: { sourceCount: 1, issues: [] },
-};
+beforeEach(() => {
+  mocks.invoke.mockReset();
+  mocks.listen.mockReset();
+  mocks.listen.mockResolvedValue(() => undefined);
+});
+afterEach(cleanup);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((nextResolve) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
     resolve = nextResolve;
+    reject = nextReject;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
-test("blocks overlapping widget layout saves", async () => {
-  const save = deferred<void>();
-  const onLayout = vi.fn(() => save.promise);
+function mockApp(save: (widgets: WidgetInstance[]) => Promise<void>) {
+  mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+    if (command === "dashboard") {
+      return Promise.resolve({ today: [], inbox: [], upcoming: [], attention: [] });
+    }
+    if (command === "widget_layout") return Promise.resolve(initialLayout);
+    if (command === "save_widget_layout") {
+      return save((args as { widgets: WidgetInstance[] }).widgets);
+    }
+    return Promise.resolve([]);
+  });
+}
 
-  render(
-    <DesktopSurface
-      data={data}
-      layout={layout}
-      loading={false}
-      editing
-      pendingWorkIds={new Set()}
-      onEdit={() => undefined}
-      onLayout={onLayout}
-      onRun={async () => undefined}
-      onOpen={async () => undefined}
-      onSources={() => undefined}
-    />,
-  );
+async function enterEditMode() {
+  const edit = await screen.findByRole("button", { name: "Edit layout" });
+  await waitFor(() => expect(edit).toBeEnabled());
+  fireEvent.click(edit);
+  return screen.getByRole("button", { name: "Resize Today" });
+}
 
-  const resize = screen.getByRole("button", { name: "Resize Today" });
-  const move = screen.getByRole("button", { name: "Move Inbox up" });
-  const add = screen.getByRole("button", { name: /Upcoming.*Add/ });
+test("serializes layout saves and rolls the latest failure back to the last persisted layout", async () => {
+  const first = deferred<void>();
+  const second = deferred<void>();
+  const saved: WidgetInstance[][] = [];
+  mockApp((widgets) => {
+    saved.push(widgets);
+    return saved.length === 1 ? first.promise : second.promise;
+  });
+
+  render(<App />);
+  const resize = await enterEditMode();
 
   fireEvent.click(resize);
-  expect(onLayout).toHaveBeenCalledTimes(1);
-  expect(resize).toBeDisabled();
-  expect(move).toBeDisabled();
-  expect(add).toBeDisabled();
+  await waitFor(() => expect(resize).toHaveTextContent("tall"));
+  fireEvent.click(resize);
+  await waitFor(() => expect(resize).toHaveTextContent("compact"));
 
-  fireEvent.click(move);
-  fireEvent.click(add);
-  expect(onLayout).toHaveBeenCalledTimes(1);
+  expect(saved).toHaveLength(1);
+  expect(saved[0].find((widget) => widget.widgetType === "today")?.size).toBe(
+    "tall",
+  );
 
-  await act(async () => save.resolve(undefined));
+  await act(async () => first.resolve(undefined));
+  await waitFor(() => expect(saved).toHaveLength(2));
+  expect(saved[1].find((widget) => widget.widgetType === "today")?.size).toBe(
+    "compact",
+  );
 
-  await waitFor(() => expect(resize).toBeEnabled());
-  expect(move).toBeEnabled();
-  expect(add).toBeEnabled();
+  await act(async () => second.reject(new Error("second layout save failed")));
+
+  await waitFor(() => expect(resize).toHaveTextContent("tall"));
+  expect(screen.getByText(/second layout save failed/)).toBeInTheDocument();
+});
+
+test("keeps the latest layout intent when an older queued save fails", async () => {
+  const first = deferred<void>();
+  const second = deferred<void>();
+  const saved: WidgetInstance[][] = [];
+  mockApp((widgets) => {
+    saved.push(widgets);
+    return saved.length === 1 ? first.promise : second.promise;
+  });
+
+  render(<App />);
+  const resize = await enterEditMode();
+
+  fireEvent.click(resize);
+  await waitFor(() => expect(resize).toHaveTextContent("tall"));
+  fireEvent.click(resize);
+  await waitFor(() => expect(resize).toHaveTextContent("compact"));
+  expect(saved).toHaveLength(1);
+
+  await act(async () => first.reject(new Error("first layout save failed")));
+  await waitFor(() => expect(saved).toHaveLength(2));
+  expect(resize).toHaveTextContent("compact");
+
+  await act(async () => second.resolve(undefined));
+  expect(resize).toHaveTextContent("compact");
+  expect(screen.queryByText(/first layout save failed/)).not.toBeInTheDocument();
+});
+
+test("does not allow layout editing before persisted layout hydration completes", async () => {
+  const hydration = deferred<WidgetInstance[]>();
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard") {
+      return Promise.resolve({ today: [], inbox: [], upcoming: [], attention: [] });
+    }
+    if (command === "widget_layout") return hydration.promise;
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  const edit = await screen.findByRole("button", { name: "Edit layout" });
+  expect(edit).toBeDisabled();
+
+  await act(async () => hydration.resolve(initialLayout));
+  await waitFor(() => expect(edit).toBeEnabled());
 });
