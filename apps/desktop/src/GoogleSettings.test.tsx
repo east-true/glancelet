@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -13,6 +14,41 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 
 beforeEach(() => mocks.invoke.mockReset());
 afterEach(cleanup);
+
+test("prevents duplicate Google connection requests while one is pending", async () => {
+  let resolveConnect: (() => void) | undefined;
+  const pendingConnect = new Promise<void>((resolve) => {
+    resolveConnect = resolve;
+  });
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "connect_google") return pendingConnect;
+    return Promise.resolve(undefined);
+  });
+  const refresh = vi.fn().mockResolvedValue(undefined);
+
+  render(
+    <GoogleSettings
+      busy={false}
+      connections={[]}
+      refresh={refresh}
+      refreshWork={vi.fn().mockResolvedValue(undefined)}
+      setError={vi.fn()}
+    />,
+  );
+
+  const connect = screen.getByRole("button", { name: "Connect Google" });
+  fireEvent.click(connect);
+  fireEvent.click(connect);
+
+  expect(connect).toBeDisabled();
+  expect(
+    mocks.invoke.mock.calls.filter(([command]) => command === "connect_google"),
+  ).toHaveLength(1);
+
+  await act(async () => resolveConnect?.());
+  await waitFor(() => expect(connect).toBeEnabled());
+  expect(refresh).toHaveBeenCalledTimes(1);
+});
 
 test("keeps selected calendars when saving fails", async () => {
   mocks.invoke.mockImplementation((command: string) => {
