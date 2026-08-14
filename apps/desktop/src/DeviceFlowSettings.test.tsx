@@ -134,6 +134,57 @@ test("shows a GitHub refresh failure after device authorization succeeds", async
   expect(screen.getByRole("button", { name: "Connect GitHub" })).toBeEnabled();
 });
 
+test("ignores an authorized GitHub poll from a cancelled older session", async () => {
+  const stalePoll = deferred<{
+    status: "authorized";
+    retryAfterSeconds: null;
+  }>();
+  let starts = 0;
+  mocks.invoke.mockImplementation((command: string, payload?: unknown) => {
+    if (command === "start_github_connection") {
+      starts += 1;
+      return Promise.resolve({
+        sessionId: starts === 1 ? "github-old" : "github-new",
+        userCode: starts === 1 ? "OLD-GH" : "NEW-GH",
+        verificationUri: "https://github.com/login/device",
+        retryAfterSeconds: starts === 1 ? 0 : 60,
+      });
+    }
+    if (command === "poll_github_connection") {
+      const sessionId = (payload as { sessionId: string }).sessionId;
+      if (sessionId === "github-old") return stalePoll.promise;
+    }
+    return Promise.resolve(undefined);
+  });
+  const refresh = vi.fn().mockResolvedValue(undefined);
+
+  render(
+    <GithubSettings
+      busy={false}
+      connections={[]}
+      refresh={refresh}
+      refreshWork={vi.fn().mockResolvedValue(undefined)}
+      setError={vi.fn()}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
+  expect(await screen.findByText("OLD-GH")).toBeInTheDocument();
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("poll_github_connection", {
+      sessionId: "github-old",
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
+  expect(await screen.findByText("NEW-GH")).toBeInTheDocument();
+
+  stalePoll.resolve({ status: "authorized", retryAfterSeconds: null });
+
+  await waitFor(() => expect(screen.getByText("NEW-GH")).toBeInTheDocument());
+  expect(refresh).not.toHaveBeenCalled();
+});
+
 test("cancels a GitLab device session that starts after unmount", async () => {
   const start = deferred<{
     sessionId: string;
@@ -249,4 +300,58 @@ test("shows a GitLab refresh failure after device authorization succeeds", async
   expect(await screen.findByText(/GitLab refresh failed/)).toBeInTheDocument();
   expect(refresh).toHaveBeenCalledTimes(1);
   expect(screen.getByRole("button", { name: "Connect GitLab" })).toBeEnabled();
+});
+
+test("ignores an authorized GitLab poll from a cancelled older session", async () => {
+  const stalePoll = deferred<{
+    status: "authorized";
+    retryAfterSeconds: null;
+  }>();
+  let starts = 0;
+  mocks.invoke.mockImplementation((command: string, payload?: unknown) => {
+    if (command === "start_gitlab_connection") {
+      starts += 1;
+      return Promise.resolve({
+        sessionId: starts === 1 ? "gitlab-old" : "gitlab-new",
+        userCode: starts === 1 ? "OLD-GL" : "NEW-GL",
+        verificationUri: "https://gitlab.com/oauth/device",
+        verificationUriComplete: null,
+        retryAfterSeconds: starts === 1 ? 0 : 60,
+      });
+    }
+    if (command === "poll_gitlab_connection") {
+      const sessionId = (payload as { sessionId: string }).sessionId;
+      if (sessionId === "gitlab-old") return stalePoll.promise;
+    }
+    return Promise.resolve(undefined);
+  });
+  const refresh = vi.fn().mockResolvedValue(undefined);
+
+  render(
+    <GitlabSettings
+      busy={false}
+      connections={[]}
+      refresh={refresh}
+      refreshWork={vi.fn().mockResolvedValue(undefined)}
+      setError={vi.fn()}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "Connect GitLab" }));
+  fireEvent.click(screen.getByRole("button", { name: "Connect GitLab.com" }));
+  expect(await screen.findByText("OLD-GL")).toBeInTheDocument();
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("poll_gitlab_connection", {
+      sessionId: "gitlab-old",
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  fireEvent.click(screen.getByRole("button", { name: "Connect GitLab" }));
+  fireEvent.click(screen.getByRole("button", { name: "Connect GitLab.com" }));
+  expect(await screen.findByText("NEW-GL")).toBeInTheDocument();
+
+  stalePoll.resolve({ status: "authorized", retryAfterSeconds: null });
+
+  await waitFor(() => expect(screen.getByText("NEW-GL")).toBeInTheDocument());
+  expect(refresh).not.toHaveBeenCalled();
 });
