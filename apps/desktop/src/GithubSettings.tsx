@@ -33,9 +33,11 @@ export function GithubSettings({
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useDismissingError();
   const activeSession = useRef<string | null>(null);
+  const mounted = useRef(true);
 
   useEffect(
     () => () => {
+      mounted.current = false;
       const sessionId = activeSession.current;
       activeSession.current = null;
       if (sessionId) void glanceletApi.cancelGithubConnection(sessionId);
@@ -49,10 +51,15 @@ export function GithubSettings({
     try {
       setConnectError(null);
       const challenge = await glanceletApi.startGithubConnection();
+      if (!mounted.current) {
+        void glanceletApi.cancelGithubConnection(challenge.sessionId);
+        return;
+      }
       activeSession.current = challenge.sessionId;
       setAuthorization(challenge);
       void pollAuthorization(challenge);
     } catch (reason) {
+      if (!mounted.current) return;
       setConnecting(false);
       setConnectError(String(reason));
     }
