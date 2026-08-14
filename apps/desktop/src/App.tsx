@@ -71,6 +71,10 @@ export default function App() {
     alwaysOnTop: false,
     launchAtStartup: false,
   });
+  const [pendingDesktopSettings, setPendingDesktopSettings] = useState<
+    Set<keyof DesktopSettings>
+  >(() => new Set());
+  const pendingDesktopSettingsRef = useRef(new Set<keyof DesktopSettings>());
   const [slackConnections, setSlackConnections] = useState<SlackConnection[]>(
     [],
   );
@@ -297,16 +301,21 @@ export default function App() {
     key: keyof DesktopSettings,
     enabled: boolean,
   ) {
-    const previous = desktopSettings;
-    const next = { ...previous, [key]: enabled };
-    setDesktopSettings(next);
+    if (pendingDesktopSettingsRef.current.has(key)) return;
+    const previous = desktopSettings[key];
+    pendingDesktopSettingsRef.current.add(key);
+    setPendingDesktopSettings(new Set(pendingDesktopSettingsRef.current));
+    setDesktopSettings((current) => ({ ...current, [key]: enabled }));
     try {
       setError(null);
       if (key === "alwaysOnTop") await glanceletApi.setAlwaysOnTop(enabled);
       else await glanceletApi.setLaunchAtStartup(enabled);
     } catch (reason) {
-      setDesktopSettings(previous);
+      setDesktopSettings((current) => ({ ...current, [key]: previous }));
       setError(String(reason));
+    } finally {
+      pendingDesktopSettingsRef.current.delete(key);
+      setPendingDesktopSettings(new Set(pendingDesktopSettingsRef.current));
     }
   }
 
@@ -488,6 +497,7 @@ export default function App() {
           ) : (
             <GeneralSettings
               settings={desktopSettings}
+              pending={pendingDesktopSettings}
               update={updateDesktopSetting}
             />
           )}
@@ -499,9 +509,11 @@ export default function App() {
 
 function GeneralSettings({
   settings,
+  pending,
   update,
 }: {
   settings: DesktopSettings;
+  pending: Set<keyof DesktopSettings>;
   update: (key: keyof DesktopSettings, enabled: boolean) => Promise<void>;
 }) {
   return (
@@ -518,6 +530,7 @@ function GeneralSettings({
         <input
           type="checkbox"
           checked={settings.alwaysOnTop}
+          disabled={pending.has("alwaysOnTop")}
           onChange={(event) => void update("alwaysOnTop", event.target.checked)}
         />
       </label>
@@ -529,6 +542,7 @@ function GeneralSettings({
         <input
           type="checkbox"
           checked={settings.launchAtStartup}
+          disabled={pending.has("launchAtStartup")}
           onChange={(event) =>
             void update("launchAtStartup", event.target.checked)
           }
