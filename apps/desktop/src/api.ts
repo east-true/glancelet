@@ -336,19 +336,22 @@ export function connectionToneLabel(tone: ConnectionTone): string {
 
 function latestSnapshot<T>(read: () => Promise<T>): () => Promise<T> {
   let generation = 0;
-  let latest: Promise<T> | undefined;
+  let latest: Promise<T>;
 
-  return async () => {
+  return () => {
     const request = ++generation;
     const current = read();
-    latest = current;
-    try {
-      const value = await current;
-      if (request === generation) return value;
-    } catch (reason) {
-      if (request === generation) throw reason;
-    }
-    return await latest;
+    const result = (async () => {
+      try {
+        const value = await current;
+        if (request === generation) return value;
+      } catch (reason) {
+        if (request === generation) throw reason;
+      }
+      return await latest;
+    })();
+    latest = result;
+    return result;
   };
 }
 
