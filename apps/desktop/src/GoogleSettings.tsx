@@ -89,15 +89,20 @@ function GoogleConnectionCard({
   const [selected, setSelected] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
 
-  async function act(operation: () => Promise<unknown>, work = false) {
+  async function act(
+    operation: () => Promise<unknown>,
+    work = false,
+  ): Promise<boolean> {
     setLoading(true);
     try {
       setError(null);
       await operation();
       await refresh();
       if (work) await refreshWork();
+      return true;
     } catch (reason) {
       setError(String(reason));
+      return false;
     } finally {
       setLoading(false);
     }
@@ -137,6 +142,14 @@ function GoogleConnectionCard({
     } finally {
       setLoading(false);
     }
+  }
+
+  async function addSelectedCalendars() {
+    const saved = await act(
+      () => glanceletApi.saveGoogleCalendars(connection.connectionId, selected),
+      true,
+    );
+    if (saved) setSelected([]);
   }
 
   return (
@@ -203,7 +216,7 @@ function GoogleConnectionCard({
               <label key={calendar.id}>
                 <input
                   type="checkbox"
-                  disabled={alreadyAdded}
+                  disabled={loading || alreadyAdded}
                   checked={alreadyAdded || selected.includes(calendar.id)}
                   onChange={(event) =>
                     setSelected((current) =>
@@ -219,16 +232,7 @@ function GoogleConnectionCard({
           })}
           <button
             disabled={loading || selected.length === 0}
-            onClick={() =>
-              void act(
-                () =>
-                  glanceletApi.saveGoogleCalendars(
-                    connection.connectionId,
-                    selected,
-                  ),
-                true,
-              ).then(() => setSelected([]))
-            }
+            onClick={() => void addSelectedCalendars()}
           >
             Add selected calendars
           </button>
