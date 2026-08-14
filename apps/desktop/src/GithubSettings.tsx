@@ -76,6 +76,7 @@ export function GithubSettings({
         const result = await glanceletApi.pollGithubConnection(
           challenge.sessionId,
         );
+        if (activeSession.current !== challenge.sessionId) return;
         if (result.status === "authorized") {
           activeSession.current = null;
           setAuthorization(null);
