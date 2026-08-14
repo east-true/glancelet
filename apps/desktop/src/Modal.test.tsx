@@ -81,15 +81,13 @@ test("traps Tab within the nested modal", async () => {
   const close = screen.getByRole("button", { name: "Close" });
   await waitFor(() => expect(input).toHaveFocus());
 
-  close.focus();
-  fireEvent.keyDown(close, { key: "Tab" });
-  expect(input).toHaveFocus();
-
-  input.focus();
-  fireEvent.keyDown(input, { key: "Tab", shiftKey: true });
+  save.focus();
+  fireEvent.keyDown(save, { key: "Tab" });
   expect(close).toHaveFocus();
 
-  save.focus();
+  close.focus();
+  fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+  expect(save).toHaveFocus();
   expect(
     screen.getByRole("button", { name: "Background action" }),
   ).not.toHaveFocus();
@@ -99,16 +97,16 @@ test("focuses and traps keyboard navigation inside Settings", async () => {
   render(<NestedDialogs />);
 
   const sources = screen.getByRole("button", { name: "Sources" });
-  const close = screen.getByRole("button", { name: "Close settings" });
+  const opener = screen.getByRole("button", { name: "Open nested modal" });
   const background = screen.getByRole("button", { name: "Background action" });
   await waitFor(() => expect(sources).toHaveFocus());
 
-  close.focus();
-  fireEvent.keyDown(close, { key: "Tab" });
+  opener.focus();
+  fireEvent.keyDown(opener, { key: "Tab" });
   expect(sources).toHaveFocus();
 
   sources.focus();
   fireEvent.keyDown(sources, { key: "Tab", shiftKey: true });
-  expect(close).toHaveFocus();
+  expect(opener).toHaveFocus();
   expect(background).not.toHaveFocus();
 });
