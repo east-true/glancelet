@@ -359,7 +359,8 @@ function mutateDesktopSettings<T>(operation: () => Promise<T>): Promise<T> {
   desktopSettingsMutationGeneration += 1;
   const mutation = operation();
   pendingDesktopSettingsMutations.add(mutation);
-  void mutation.finally(() => pendingDesktopSettingsMutations.delete(mutation));
+  const cleanup = () => pendingDesktopSettingsMutations.delete(mutation);
+  void mutation.then(cleanup, cleanup);
   return mutation;
 }
 
