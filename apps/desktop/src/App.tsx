@@ -62,6 +62,13 @@ function normalizedDashboard(value: WorkDashboard | undefined): WorkDashboard {
   };
 }
 
+function notionSettingsKey(value: NotionSourceSettings): string {
+  return JSON.stringify({
+    ...value,
+    activeStatusIds: [...value.activeStatusIds].sort(),
+  });
+}
+
 export default function App() {
   const [dashboard, setDashboard] = useState(emptyDashboard);
   const [tab, setTab] = useState<Tab>("surface");
@@ -720,7 +727,10 @@ function NotionConnectionCard({
   const [dueId, setDueId] = useState("");
   const [onlyMe, setOnlyMe] = useState(true);
   const [activeStatusIds, setActiveStatusIds] = useState<string[]>([]);
-  const [preview, setPreview] = useState<NotionPreviewRow[]>([]);
+  const [preview, setPreview] = useState<{
+    settingsKey: string;
+    rows: NotionPreviewRow[];
+  } | null>(null);
   const [editingSourceId, setEditingSourceId] = useState<string | null>(null);
 
   async function action(task: () => Promise<void>) {
@@ -796,7 +806,7 @@ function NotionConnectionCard({
         [],
     );
     setEditingSourceId(existing?.sourceId ?? null);
-    setPreview([]);
+    setPreview(null);
   }
 
   function toggleStatus(id: string) {
@@ -810,6 +820,10 @@ function NotionConnectionCard({
   const statusSchema = schema?.properties.find(
     (candidate) => candidate.id === statusId,
   )?.status;
+  const currentSettings = settings();
+  const currentSettingsKey = currentSettings
+    ? notionSettingsKey(currentSettings)
+    : null;
 
   return (
     <article className="connection-card notion-card">
@@ -1020,17 +1034,17 @@ function NotionConnectionCard({
               )}
               <div className="source-actions">
                 <button
-                  disabled={working || settings() === null}
+                  disabled={working || currentSettings === null}
                   onClick={() =>
                     void action(async () => {
                       const value = settings();
                       if (value) {
-                        setPreview(
-                          await glanceletApi.previewNotionSource(
-                            connection.connectionId,
-                            value,
-                          ),
+                        const settingsKey = notionSettingsKey(value);
+                        const rows = await glanceletApi.previewNotionSource(
+                          connection.connectionId,
+                          value,
                         );
+                        setPreview({ settingsKey, rows });
                       }
                     })
                   }
@@ -1039,7 +1053,7 @@ function NotionConnectionCard({
                 </button>
                 <button
                   className="btn-primary"
-                  disabled={working || settings() === null}
+                  disabled={working || currentSettings === null}
                   onClick={() =>
                     void action(async () => {
                       const value = settings();
@@ -1051,7 +1065,7 @@ function NotionConnectionCard({
                       );
                       setSchema(null);
                       setEditingSourceId(null);
-                      setPreview([]);
+                      setPreview(null);
                       await refresh();
                     })
                   }
@@ -1059,18 +1073,20 @@ function NotionConnectionCard({
                   {editingSourceId ? "Save changes" : "Add Source"}
                 </button>
               </div>
-              {preview.length > 0 && (
-                <div className="notion-preview">
-                  <strong>
-                    {preview.length} matching tasks (up to 10 shown)
-                  </strong>
-                  <ul>
-                    {preview.map((row) => (
-                      <li key={row.externalId}>{row.title}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
+              {preview &&
+                preview.settingsKey === currentSettingsKey &&
+                preview.rows.length > 0 && (
+                  <div className="notion-preview">
+                    <strong>
+                      {preview.rows.length} matching tasks (up to 10 shown)
+                    </strong>
+                    <ul>
+                      {preview.rows.map((row) => (
+                        <li key={row.externalId}>{row.title}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
             </>
           )}
         </div>
