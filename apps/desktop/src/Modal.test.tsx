@@ -19,31 +19,38 @@ function NestedDialogs() {
   if (!settingsOpen) return <p>Settings closed</p>;
 
   return (
-    <SettingsOverlay
-      section="sources"
-      onSection={() => undefined}
-      onClose={() => setSettingsOpen(false)}
-    >
-      <button type="button" onClick={() => setModalOpen(true)}>
-        Open nested modal
-      </button>
-      <Modal
-        open={modalOpen}
-        title="Nested dialog"
-        onClose={() => setModalOpen(false)}
+    <>
+      <button type="button">Background action</button>
+      <SettingsOverlay
+        section="sources"
+        onSection={() => undefined}
+        onClose={() => setSettingsOpen(false)}
       >
-        <label>
-          Token
-          <input aria-label="Token" />
-        </label>
-      </Modal>
-    </SettingsOverlay>
+        <button type="button" onClick={() => setModalOpen(true)}>
+          Open nested modal
+        </button>
+        <Modal
+          open={modalOpen}
+          title="Nested dialog"
+          onClose={() => setModalOpen(false)}
+        >
+          <label>
+            Token
+            <input aria-label="Token" />
+          </label>
+          <button type="button">Save token</button>
+        </Modal>
+      </SettingsOverlay>
+    </>
   );
 }
 
 test("keeps Escape scoped to the topmost dialog and restores focus", async () => {
   render(<NestedDialogs />);
   const opener = screen.getByRole("button", { name: "Open nested modal" });
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Sources" })).toHaveFocus(),
+  );
   opener.focus();
   fireEvent.click(opener);
 
@@ -62,4 +69,44 @@ test("keeps Escape scoped to the topmost dialog and restores focus", async () =>
 
   fireEvent.keyDown(opener, { key: "Escape" });
   expect(await screen.findByText("Settings closed")).toBeInTheDocument();
+});
+
+test("traps Tab within the nested modal", async () => {
+  render(<NestedDialogs />);
+  const opener = screen.getByRole("button", { name: "Open nested modal" });
+  fireEvent.click(opener);
+
+  const input = screen.getByRole("textbox", { name: "Token" });
+  const save = screen.getByRole("button", { name: "Save token" });
+  const close = screen.getByRole("button", { name: "Close" });
+  await waitFor(() => expect(input).toHaveFocus());
+
+  save.focus();
+  fireEvent.keyDown(save, { key: "Tab" });
+  expect(close).toHaveFocus();
+
+  close.focus();
+  fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+  expect(save).toHaveFocus();
+  expect(
+    screen.getByRole("button", { name: "Background action" }),
+  ).not.toHaveFocus();
+});
+
+test("focuses and traps keyboard navigation inside Settings", async () => {
+  render(<NestedDialogs />);
+
+  const sources = screen.getByRole("button", { name: "Sources" });
+  const opener = screen.getByRole("button", { name: "Open nested modal" });
+  const background = screen.getByRole("button", { name: "Background action" });
+  await waitFor(() => expect(sources).toHaveFocus());
+
+  opener.focus();
+  fireEvent.keyDown(opener, { key: "Tab" });
+  expect(sources).toHaveFocus();
+
+  sources.focus();
+  fireEvent.keyDown(sources, { key: "Tab", shiftKey: true });
+  expect(opener).toHaveFocus();
+  expect(background).not.toHaveFocus();
 });
