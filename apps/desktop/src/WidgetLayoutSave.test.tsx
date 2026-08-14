@@ -62,97 +62,88 @@ async function enterEditMode() {
   return screen.getByRole("button", { name: "Resize Today" });
 }
 
-test(
-  "serializes layout saves and rolls the latest failure back to the last persisted layout",
-  async () => {
-    const first = deferred<void>();
-    const second = deferred<void>();
-    const saved: WidgetInstance[][] = [];
-    mockApp((widgets) => {
-      saved.push(widgets);
-      return saved.length === 1 ? first.promise : second.promise;
-    });
+test("serializes layout saves and rolls back the latest failure", async () => {
+  const first = deferred<void>();
+  const second = deferred<void>();
+  const saved: WidgetInstance[][] = [];
+  mockApp((widgets) => {
+    saved.push(widgets);
+    return saved.length === 1 ? first.promise : second.promise;
+  });
 
-    render(<App />);
-    const resize = await enterEditMode();
+  render(<App />);
+  const resize = await enterEditMode();
 
-    fireEvent.click(resize);
-    await waitFor(() => expect(resize).toHaveTextContent("tall"));
-    fireEvent.click(resize);
-    await waitFor(() => expect(resize).toHaveTextContent("compact"));
+  fireEvent.click(resize);
+  await waitFor(() => expect(resize).toHaveTextContent("tall"));
+  fireEvent.click(resize);
+  await waitFor(() => expect(resize).toHaveTextContent("compact"));
 
-    expect(saved).toHaveLength(1);
-    expect(saved[0].find((widget) => widget.widgetType === "today")?.size).toBe(
-      "tall",
-    );
+  expect(saved).toHaveLength(1);
+  expect(saved[0].find((widget) => widget.widgetType === "today")?.size).toBe(
+    "tall",
+  );
 
-    await act(async () => first.resolve(undefined));
-    await waitFor(() => expect(saved).toHaveLength(2));
-    expect(saved[1].find((widget) => widget.widgetType === "today")?.size).toBe(
-      "compact",
-    );
+  await act(async () => first.resolve(undefined));
+  await waitFor(() => expect(saved).toHaveLength(2));
+  expect(saved[1].find((widget) => widget.widgetType === "today")?.size).toBe(
+    "compact",
+  );
 
-    await act(async () => second.reject(new Error("second layout save failed")));
+  await act(async () => second.reject(new Error("second layout save failed")));
 
-    await waitFor(() => expect(resize).toHaveTextContent("tall"));
-    expect(screen.getByText(/second layout save failed/)).toBeInTheDocument();
-  },
-);
+  await waitFor(() => expect(resize).toHaveTextContent("tall"));
+  expect(screen.getByText(/second layout save failed/)).toBeInTheDocument();
+});
 
-test(
-  "keeps the latest layout intent when an older queued save fails",
-  async () => {
-    const first = deferred<void>();
-    const second = deferred<void>();
-    const saved: WidgetInstance[][] = [];
-    mockApp((widgets) => {
-      saved.push(widgets);
-      return saved.length === 1 ? first.promise : second.promise;
-    });
+test("preserves newer layout intent after an older save fails", async () => {
+  const first = deferred<void>();
+  const second = deferred<void>();
+  const saved: WidgetInstance[][] = [];
+  mockApp((widgets) => {
+    saved.push(widgets);
+    return saved.length === 1 ? first.promise : second.promise;
+  });
 
-    render(<App />);
-    const resize = await enterEditMode();
+  render(<App />);
+  const resize = await enterEditMode();
 
-    fireEvent.click(resize);
-    await waitFor(() => expect(resize).toHaveTextContent("tall"));
-    fireEvent.click(resize);
-    await waitFor(() => expect(resize).toHaveTextContent("compact"));
-    expect(saved).toHaveLength(1);
+  fireEvent.click(resize);
+  await waitFor(() => expect(resize).toHaveTextContent("tall"));
+  fireEvent.click(resize);
+  await waitFor(() => expect(resize).toHaveTextContent("compact"));
+  expect(saved).toHaveLength(1);
 
-    await act(async () => first.reject(new Error("first layout save failed")));
-    await waitFor(() => expect(saved).toHaveLength(2));
-    expect(resize).toHaveTextContent("compact");
+  await act(async () => first.reject(new Error("first layout save failed")));
+  await waitFor(() => expect(saved).toHaveLength(2));
+  expect(resize).toHaveTextContent("compact");
 
-    await act(async () => second.resolve(undefined));
-    expect(resize).toHaveTextContent("compact");
-    expect(
-      screen.queryByText(/first layout save failed/),
-    ).not.toBeInTheDocument();
-  },
-);
+  await act(async () => second.resolve(undefined));
+  expect(resize).toHaveTextContent("compact");
+  expect(
+    screen.queryByText(/first layout save failed/),
+  ).not.toBeInTheDocument();
+});
 
-test(
-  "does not allow layout editing before persisted layout hydration completes",
-  async () => {
-    const hydration = deferred<WidgetInstance[]>();
-    mocks.invoke.mockImplementation((command: string) => {
-      if (command === "dashboard") {
-        return Promise.resolve({
-          today: [],
-          inbox: [],
-          upcoming: [],
-          attention: [],
-        });
-      }
-      if (command === "widget_layout") return hydration.promise;
-      return Promise.resolve([]);
-    });
+test("waits for layout hydration before editing", async () => {
+  const hydration = deferred<WidgetInstance[]>();
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard") {
+      return Promise.resolve({
+        today: [],
+        inbox: [],
+        upcoming: [],
+        attention: [],
+      });
+    }
+    if (command === "widget_layout") return hydration.promise;
+    return Promise.resolve([]);
+  });
 
-    render(<App />);
-    const edit = await screen.findByRole("button", { name: "Edit layout" });
-    expect(edit).toBeDisabled();
+  render(<App />);
+  const edit = await screen.findByRole("button", { name: "Edit layout" });
+  expect(edit).toBeDisabled();
 
-    await act(async () => hydration.resolve(initialLayout));
-    await waitFor(() => expect(edit).toBeEnabled());
-  },
-);
+  await act(async () => hydration.resolve(initialLayout));
+  await waitFor(() => expect(edit).toBeEnabled());
+});
