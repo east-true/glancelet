@@ -8,6 +8,14 @@ const focusableBodyElement = [
   '.modal-body [tabindex]:not([tabindex="-1"])',
 ].join(", ");
 
+const focusableDialogElement = [
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])',
+].join(", ");
+
 export function Modal({
   open,
   title,
@@ -36,10 +44,38 @@ export function Modal({
         : null;
 
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      onCloseRef.current();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusable = Array.from(
+        dialog.querySelectorAll<HTMLElement>(focusableDialogElement),
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        dialog.focus();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !dialog.contains(active))) {
+        event.preventDefault();
+        event.stopPropagation();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+        event.preventDefault();
+        event.stopPropagation();
+        first.focus();
+      }
     }
 
     document.addEventListener("keydown", onKeyDown, true);
