@@ -92,12 +92,12 @@ test("shows a Notion preview only for the mapping that produced it", async () =>
 
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
-  fireEvent.change(
-    screen.getByRole("textbox", { name: "Notion Data Source ID" }),
-    {
-      target: { value: "ds-1" },
-    },
-  );
+  const dataSourceId = await screen.findByRole("textbox", {
+    name: "Notion Data Source ID",
+  });
+  fireEvent.change(dataSourceId, {
+    target: { value: "ds-1" },
+  });
   fireEvent.click(screen.getByRole("button", { name: "Load schema" }));
 
   const due = await screen.findByRole("combobox", { name: "Due Date" });
