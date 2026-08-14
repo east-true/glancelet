@@ -44,7 +44,9 @@ export function SettingsOverlay({
       }
       if (event.key !== "Tab") return;
 
-      const nestedDialog = dialog.querySelector('[role="dialog"][aria-modal="true"]');
+      const nestedDialog = dialog.querySelector(
+        '[role="dialog"][aria-modal="true"]',
+      );
       if (nestedDialog) return;
 
       const focusable = Array.from(
@@ -59,17 +61,25 @@ export function SettingsOverlay({
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
       const active = document.activeElement;
-      if (event.shiftKey && (active === first || !dialog.contains(active))) {
+      if (
+        event.shiftKey &&
+        (active === first || !dialog.contains(active))
+      ) {
         event.preventDefault();
         last.focus();
-      } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+      } else if (
+        !event.shiftKey &&
+        (active === last || !dialog.contains(active))
+      ) {
         event.preventDefault();
         first.focus();
       }
     }
 
     document.addEventListener("keydown", onKeyDown);
-    dialogRef.current?.querySelector<HTMLElement>(focusableOverlayElement)?.focus();
+    dialogRef.current
+      ?.querySelector<HTMLElement>(focusableOverlayElement)
+      ?.focus();
 
     return () => {
       document.removeEventListener("keydown", onKeyDown);
