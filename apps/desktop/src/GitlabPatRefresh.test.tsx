@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { GitlabSettings } from "./GitlabSettings";
 
@@ -27,9 +33,12 @@ test("shows a refresh failure after self-managed GitLab connection succeeds", as
 
   fireEvent.click(screen.getByRole("button", { name: "Connect GitLab" }));
   fireEvent.click(screen.getByRole("tab", { name: "Self-managed" }));
-  fireEvent.change(screen.getByRole("textbox", { name: "GitLab instance URL" }), {
-    target: { value: "https://gitlab.example.com" },
-  });
+  fireEvent.change(
+    screen.getByRole("textbox", { name: "GitLab instance URL" }),
+    {
+      target: { value: "https://gitlab.example.com" },
+    },
+  );
   fireEvent.change(screen.getByLabelText("GitLab Personal Access Token"), {
     target: { value: "dummy-token" },
   });
