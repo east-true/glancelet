@@ -77,6 +77,7 @@ export function GitlabSettings({
         const result = await glanceletApi.pollGitlabConnection(
           challenge.sessionId,
         );
+        if (activeSession.current !== challenge.sessionId) return;
         if (result.status === "authorized") {
           activeSession.current = null;
           setAuthorization(null);
