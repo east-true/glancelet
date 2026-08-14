@@ -1,4 +1,11 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "./App";
 import type { WidgetInstance } from "./api";
@@ -33,7 +40,12 @@ function deferred<T>() {
 function mockApp(save: (widgets: WidgetInstance[]) => Promise<void>) {
   mocks.invoke.mockImplementation((command: string, args?: unknown) => {
     if (command === "dashboard") {
-      return Promise.resolve({ today: [], inbox: [], upcoming: [], attention: [] });
+      return Promise.resolve({
+        today: [],
+        inbox: [],
+        upcoming: [],
+        attention: [],
+      });
     }
     if (command === "widget_layout") return Promise.resolve(initialLayout);
     if (command === "save_widget_layout") {
@@ -115,7 +127,12 @@ test("does not allow layout editing before persisted layout hydration completes"
   const hydration = deferred<WidgetInstance[]>();
   mocks.invoke.mockImplementation((command: string) => {
     if (command === "dashboard") {
-      return Promise.resolve({ today: [], inbox: [], upcoming: [], attention: [] });
+      return Promise.resolve({
+        today: [],
+        inbox: [],
+        upcoming: [],
+        attention: [],
+      });
     }
     if (command === "widget_layout") return hydration.promise;
     return Promise.resolve([]);
