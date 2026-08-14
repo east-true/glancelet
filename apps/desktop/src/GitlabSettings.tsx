@@ -34,9 +34,11 @@ export function GitlabSettings({
   const [selfManagedError, setSelfManagedError] = useDismissingError();
   const [connectError, setConnectError] = useDismissingError();
   const activeSession = useRef<string | null>(null);
+  const mounted = useRef(true);
 
   useEffect(
     () => () => {
+      mounted.current = false;
       const sessionId = activeSession.current;
       activeSession.current = null;
       if (sessionId) void glanceletApi.cancelGitlabConnection(sessionId);
@@ -50,10 +52,15 @@ export function GitlabSettings({
     try {
       setConnectError(null);
       const challenge = await glanceletApi.startGitlabConnection();
+      if (!mounted.current) {
+        void glanceletApi.cancelGitlabConnection(challenge.sessionId);
+        return;
+      }
       activeSession.current = challenge.sessionId;
       setAuthorization(challenge);
       void pollAuthorization(challenge);
     } catch (reason) {
+      if (!mounted.current) return;
       setConnecting(false);
       setConnectError(String(reason));
     }
