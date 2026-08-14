@@ -87,6 +87,18 @@ npm test
 npm run build
 ```
 
+### Troubleshooting
+
+The following are specific to Linux and usually show up on virtual machines,
+remote desktop sessions, WSL, or headless machines rather than on a local
+desktop.
+
+| Symptom                                              | Cause                                                                             | Resolution                                                                                                                    |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `Failed to initialize gtk backend!` panic on startup | No display server is reachable, because `DISPLAY` and `WAYLAND_DISPLAY` are unset | Point `DISPLAY` at a running X session, for example `export DISPLAY=:0`, or run the app under `xvfb-run -a npm run tauri dev` |
+| `libEGL warning: failed to open /dev/dri/...`        | Hardware acceleration is unavailable, so rendering falls back to software         | Harmless. The app runs normally                                                                                               |
+| The window opens but stays blank                     | WebKitGTK's DMABUF renderer does not work on this setup                           | Set `WEBKIT_DISABLE_DMABUF_RENDERER=1` before running `npm run tauri dev`                                                     |
+
 ## How it works
 
 A source adapter fetches a batch from the provider; the batch becomes durable

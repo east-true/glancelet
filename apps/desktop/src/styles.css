@@ -23,6 +23,7 @@
   --gl-text-muted: #687168;
   --gl-text-subtle: #899189;
   --gl-accent: #356c43;
+  --gl-accent-strong: #2b5c38;
   --gl-accent-soft: #e8f1e8;
   --gl-danger: #ae4543;
   --gl-danger-soft: #fbeeed;
@@ -48,8 +49,63 @@ body {
   min-height: 100vh;
   background: var(--gl-bg);
 }
+/* Buttons.
+   Every button shares one base look. Modifier classes carry the purpose, so a
+   button's colour says what it does rather than where it happens to sit:
+     .btn-primary  the single affirmative action of a view (connect, sync)
+     .btn-danger   destructive or disconnecting actions
+     .btn-quiet    low-emphasis inline actions (cancel, dismiss, row actions)
+     .active       a selected toggle state */
 button {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 12px;
+  border: 1px solid var(--gl-border);
+  border-radius: var(--gl-radius-sm);
+  color: var(--gl-text);
+  background: var(--gl-surface);
   font: inherit;
+  cursor: pointer;
+}
+button:hover:not(:disabled) {
+  border-color: var(--gl-border-strong);
+  background: var(--gl-bg-hover);
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn-primary {
+  color: #ffffff;
+  border-color: var(--gl-accent);
+  background: var(--gl-accent);
+}
+.btn-primary:hover:not(:disabled) {
+  color: #ffffff;
+  border-color: var(--gl-accent-strong);
+  background: var(--gl-accent-strong);
+}
+.btn-danger {
+  color: var(--gl-danger);
+  border-color: color-mix(in srgb, var(--gl-danger), transparent 60%);
+  background: var(--gl-surface);
+}
+.btn-danger:hover:not(:disabled) {
+  color: var(--gl-danger);
+  border-color: var(--gl-danger);
+  background: var(--gl-danger-soft);
+}
+.btn-quiet {
+  color: var(--gl-text-muted);
+  border-color: transparent;
+  background: transparent;
+}
+.btn-quiet:hover:not(:disabled) {
+  color: var(--gl-text);
+  border-color: transparent;
+  background: var(--gl-bg-hover);
 }
 .app-shell {
   width: min(100%, 1040px);
@@ -57,79 +113,58 @@ button {
   margin: 0 auto;
   padding: 20px 18px 32px;
 }
-.masthead {
+.toolbar-row {
   display: flex;
+  gap: 10px;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
+  margin-bottom: 12px;
 }
-.eyebrow {
-  margin: 0 0 4px;
-  color: var(--gl-accent);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-h1 {
-  margin: 0;
-  font-size: 26px;
-  letter-spacing: -0.04em;
-}
-.sync-button,
-.tabs button,
-.source-settings button,
-.surface-toolbar button,
-.widget button,
-.add-widget-panel button,
-.first-run-card button,
-.health-banner {
-  border: 1px solid var(--gl-border);
-  color: var(--gl-text);
-  background: transparent;
-  cursor: pointer;
-}
-.sync-button {
-  padding: 9px 13px;
-  border-radius: 10px;
-  color: #ffffff;
-  border-color: var(--gl-accent);
-  background: var(--gl-accent);
-}
-.sync-button:hover,
-.surface-toolbar button:hover,
-.widget button:hover,
-.add-widget-panel button:hover,
-.first-run-card button:hover {
-  background: var(--gl-bg-hover);
-}
-.sync-button:hover {
-  color: #ffffff;
-  background: #2b5c38;
+.icon-button {
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border-radius: 11px;
 }
 .sync-button:disabled {
-  color: #e3e9e2;
   border-color: #7f9a84;
   background: #7f9a84;
+  opacity: 1;
   cursor: wait;
+}
+.sync-button[data-busy="true"] svg {
+  animation: gl-spin 900ms linear infinite;
+}
+@keyframes gl-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .tabs {
   display: flex;
   gap: 6px;
-  margin: 18px 0 12px;
-  padding-bottom: 9px;
-  border-bottom: 1px solid var(--gl-border);
+  min-width: 0;
+  overflow-x: auto;
 }
-.tabs button {
-  display: flex;
+.tabs button,
+.mode-toggle button {
+  flex: 0 0 auto;
   gap: 8px;
-  align-items: center;
   padding: 8px 11px;
   border-color: transparent;
   border-radius: 9px;
   color: var(--gl-text-muted);
+  background: transparent;
 }
-.tabs button.active {
+.tabs button:hover:not(:disabled),
+.mode-toggle button:hover:not(:disabled) {
+  border-color: transparent;
+}
+.tabs button.active,
+.mode-toggle button.active {
   color: var(--gl-accent);
+  border-color: transparent;
   background: var(--gl-accent-soft);
 }
 .tabs span {
@@ -157,37 +192,16 @@ select:focus-visible {
 .surface-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-}
-.surface-toolbar p {
-  margin: 0;
-}
-.surface-kicker {
-  color: var(--gl-text-muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
 }
 .surface-summary {
-  margin-top: 3px !important;
+  margin: 0;
   font-size: 14px;
-}
-.surface-toolbar button {
-  padding: 7px 10px;
-  border-radius: var(--gl-radius-sm);
-  color: var(--gl-text-muted);
-  font-size: 12px;
-}
-.surface-toolbar button.active {
-  color: #ffffff;
-  border-color: var(--gl-accent);
-  background: var(--gl-accent);
 }
 .health-banner {
   display: flex;
   gap: 9px;
   align-items: center;
+  justify-content: flex-start;
   width: 100%;
   padding: 9px 12px;
   border-color: color-mix(in srgb, var(--gl-attention), white 70%);
@@ -257,6 +271,8 @@ select:focus-visible {
 .widget-grid.editing .widget {
   border-color: color-mix(in srgb, var(--gl-accent), white 50%);
   background: color-mix(in srgb, var(--gl-surface), var(--gl-accent-soft) 22%);
+  -webkit-user-select: none;
+  user-select: none;
 }
 .widget-grid.editing .widget:hover {
   border-color: var(--gl-accent);
@@ -319,6 +335,7 @@ select:focus-visible {
   min-height: 58px;
   padding: 10px 13px;
   border: 0 !important;
+  border-radius: 0;
   color: inherit;
   text-align: left;
   background: transparent !important;
@@ -494,6 +511,12 @@ select:focus-visible {
 .general-settings label small {
   color: var(--gl-text-muted);
 }
+.general-settings input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  accent-color: var(--gl-accent);
+}
 
 @media (max-width: 680px) {
   .widget-grid {
@@ -514,53 +537,97 @@ select:focus-visible {
   *::after {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    animation-duration: 0.01ms !important;
   }
 }
 .error-banner {
+  margin: 0;
   padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--gl-danger), transparent 55%);
   border-radius: 9px;
   color: var(--gl-danger);
   background: var(--gl-danger-soft);
   font-size: 12px;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+}
+.error-banner.is-visible {
+  opacity: 1;
+  transform: translateY(0);
 }
 .source-settings {
   display: grid;
   gap: 12px;
 }
 .settings-heading,
-.source-identity,
-.source-card label {
+.source-heading {
+  display: flex;
+  gap: var(--gl-spacing);
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0 10px;
+}
+.settings-heading > div:first-child,
+.source-heading > div:first-child {
   display: grid;
   gap: 5px;
 }
-.settings-heading {
-  grid-template-columns: 1fr auto;
-  align-items: start;
-  padding: 4px 0 10px;
-}
 .settings-heading h2,
+.source-heading h2,
 .settings-heading p,
+.source-heading p,
 .source-runtime {
   margin: 0;
 }
-.settings-heading h2 {
+.settings-heading h2,
+.source-heading h2 {
   font-size: 18px;
+  font-weight: 650;
+}
+.source-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--gl-border-strong);
+}
+.status-dot-ok {
+  background: var(--gl-accent);
+}
+.status-dot-attention {
+  background: var(--gl-attention);
 }
 .settings-heading p,
+.source-heading p,
 .source-runtime,
-.source-identity span,
-.source-card label {
+.source-identity span {
   color: var(--gl-text-muted);
   font-size: 12px;
 }
+.source-identity strong,
+.connection-title strong,
+.source-row strong,
+.notion-source-row strong {
+  color: var(--gl-text);
+  font-size: 13px;
+  font-weight: 650;
+}
 .settings-heading button,
+.source-heading button,
 .source-actions button {
   padding: 8px 11px;
   border-radius: 9px;
 }
-.source-card,
-.empty-source {
+.source-card {
   padding: 16px;
   border: 1px solid var(--gl-border);
   border-radius: var(--gl-radius);
@@ -598,17 +665,28 @@ select:focus-visible {
 }
 
 .connection-card,
-.calendar-picker,
+.calendar-picker {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.source-identity,
 .source-row > div:first-child,
 .connection-title > div:first-child {
   display: grid;
-  gap: 0.45rem;
+  gap: 0.25rem;
 }
 
 .connection-card {
   border-top: 1px solid
     color-mix(in srgb, var(--gl-text-muted) 25%, transparent);
   margin-top: var(--gl-spacing);
+  padding-top: var(--gl-spacing);
+}
+
+.source-row {
+  border-top: 1px solid
+    color-mix(in srgb, var(--gl-text-muted) 20%, transparent);
   padding-top: var(--gl-spacing);
 }
 
@@ -635,8 +713,6 @@ select:focus-visible {
   justify-self: start;
 }
 
-.notion-connect-heading,
-.token-connect,
 .inline-fields,
 .notion-source-row {
   align-items: center;
@@ -644,7 +720,6 @@ select:focus-visible {
   gap: calc(var(--gl-spacing) * 0.75);
 }
 
-.token-connect input,
 .inline-fields input {
   min-width: 0;
 }
@@ -713,10 +788,6 @@ select:focus-visible {
   .app-shell {
     padding: 16px 12px 28px;
   }
-  h1 {
-    font-size: 24px;
-  }
-  .notion-connect-heading,
   .notion-source-row {
     align-items: stretch;
     flex-direction: column;
@@ -728,9 +799,6 @@ select:focus-visible {
     flex-direction: column;
   }
 }
-.source-actions .danger {
-  color: var(--gl-danger);
-}
 .github-device-code code {
   color: var(--gl-accent);
   font-size: 1.4rem;
@@ -741,7 +809,105 @@ select:focus-visible {
   color: var(--gl-text-muted);
   font-size: 0.8rem;
 }
-.empty-source {
+.modal-backdrop {
+  position: fixed;
+  z-index: 10;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(20 26 20 / 45%);
+}
+.modal {
+  width: min(100%, 420px);
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  border: 1px solid var(--gl-border);
+  border-radius: var(--gl-radius-md);
+  background: var(--gl-surface);
+  box-shadow: 0 12px 32px rgb(20 26 20 / 18%);
+}
+.modal-header {
+  display: flex;
+  gap: var(--gl-spacing);
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 8px 14px 18px;
+  border-bottom: 1px solid var(--gl-border);
+}
+.modal-header h2 {
+  margin: 0;
+  font-size: 15px;
+}
+.modal-close {
+  padding: 4px 9px;
+  border-radius: 8px;
+  font-size: 16px;
+  line-height: 1;
+}
+.modal-body {
+  padding: 18px;
+}
+.modal-form {
+  display: grid;
+  gap: var(--gl-spacing);
+}
+.modal-field {
+  display: grid;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--gl-text-muted);
+}
+.modal-field input {
+  padding: 9px 10px;
+  border: 1px solid var(--gl-border);
+  border-radius: 8px;
+  color: var(--gl-text);
+  font-size: 13px;
+  background: var(--gl-surface);
+}
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.modal-help {
+  margin: 0;
   color: var(--gl-text-muted);
   font-size: 13px;
+}
+.required-mark {
+  margin-left: 3px;
+  color: var(--gl-danger);
+}
+.mode-toggle {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+.settings-overlay {
+  position: fixed;
+  z-index: 10;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--gl-bg);
+}
+.settings-overlay-header {
+  display: flex;
+  gap: var(--gl-spacing);
+  align-items: center;
+  justify-content: space-between;
+  flex: 0 0 auto;
+  padding: 18px 18px 9px;
+  border-bottom: 1px solid var(--gl-border);
+}
+.settings-overlay-body {
+  flex: 1;
+  overflow: auto;
+  width: 100%;
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 16px 18px 32px;
+  box-sizing: border-box;
 }

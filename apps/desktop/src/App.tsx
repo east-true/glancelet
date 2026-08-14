@@ -1,6 +1,8 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  connectionTone,
+  connectionToneLabel,
   glanceletApi,
   syncReportMessage,
   type GoogleConnection,
@@ -20,9 +22,13 @@ import {
   type WorkDashboard,
 } from "./api";
 import { DesktopSurface } from "./DesktopSurface";
+import { ErrorBanner } from "./ErrorBanner";
 import { GoogleSettings } from "./GoogleSettings";
 import { GithubSettings } from "./GithubSettings";
 import { GitlabSettings } from "./GitlabSettings";
+import { Modal } from "./Modal";
+import { SettingsOverlay, type SettingsSection } from "./SettingsOverlay";
+import { useDismissingError } from "./useDismissingError";
 import "./styles.css";
 
 const emptyDashboard: WorkDashboard = {
@@ -83,6 +89,7 @@ export default function App() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [connectingSlack, setConnectingSlack] = useState(false);
+  const [slackConnectError, setSlackConnectError] = useDismissingError();
   const [pendingWorkIds, setPendingWorkIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -108,7 +115,7 @@ export default function App() {
   const refreshSlack = useCallback(async (clearError = true) => {
     try {
       if (clearError) setError(null);
-      setSlackConnections(await glanceletApi.slackConnections());
+      setSlackConnections((await glanceletApi.slackConnections()) ?? []);
     } catch (reason) {
       setError(String(reason));
     }
@@ -117,7 +124,7 @@ export default function App() {
   const refreshNotion = useCallback(async (clearError = true) => {
     try {
       if (clearError) setError(null);
-      setNotionConnections(await glanceletApi.notionConnections());
+      setNotionConnections((await glanceletApi.notionConnections()) ?? []);
     } catch (reason) {
       setError(String(reason));
     }
@@ -126,7 +133,7 @@ export default function App() {
   const refreshGoogle = useCallback(async (clearError = true) => {
     try {
       if (clearError) setError(null);
-      setGoogleConnections(await glanceletApi.googleConnections());
+      setGoogleConnections((await glanceletApi.googleConnections()) ?? []);
     } catch (reason) {
       setError(String(reason));
     }
@@ -307,11 +314,11 @@ export default function App() {
     if (connectingSlack) return;
     setConnectingSlack(true);
     try {
-      setError(null);
+      setSlackConnectError(null);
       await glanceletApi.connectSlack();
       await Promise.all([refreshSlack(false), refresh(false)]);
     } catch (reason) {
-      setError(String(reason));
+      setSlackConnectError(String(reason));
     } finally {
       setConnectingSlack(false);
     }
@@ -343,97 +350,148 @@ export default function App() {
   }
 
   const globalBusy = initialLoading || syncing;
+  const syncLabel = initialLoading ? "Loading…" : syncing ? "Syncing…" : "Sync";
 
   return (
     <main className="app-shell">
-      <header className="masthead">
-        <div>
-          <p className="eyebrow">Your work, at a glance</p>
-          <h1>Glancelet</h1>
-        </div>
+      <div className="toolbar-row">
         <button
-          className="sync-button"
+          type="button"
+          className="icon-button btn-primary"
+          aria-label={editingLayout ? "Done editing layout" : "Edit layout"}
+          aria-pressed={editingLayout}
+          title={editingLayout ? "Done editing layout" : "Edit layout"}
+          onClick={() => setEditingLayout(!editingLayout)}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="19"
+            height="19"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+          </svg>
+        </button>
+        <button
+          className="icon-button sync-button btn-primary"
+          data-busy={globalBusy}
           disabled={globalBusy}
+          aria-label={syncLabel}
+          title={syncLabel}
           onClick={() => void sync()}
         >
-          {initialLoading ? "Loading…" : syncing ? "Syncing…" : "Sync"}
-        </button>
-      </header>
-
-      <nav className="tabs" aria-label="Glancelet sections">
-        {(["surface", "sources", "settings"] as const).map((name) => (
-          <button
-            key={name}
-            className={tab === name ? "active" : ""}
-            onClick={() => void selectTab(name)}
+          <svg
+            viewBox="0 0 24 24"
+            width="19"
+            height="19"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
           >
-            {name === "surface"
-              ? "Surface"
-              : name === "sources"
-                ? "Sources"
-                : "Settings"}
-          </button>
-        ))}
-      </nav>
+            <path d="M23 4v6h-6" />
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          className="icon-button btn-primary"
+          aria-label="Open settings"
+          onClick={() => void selectTab("sources")}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="19"
+            height="19"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+        </button>
+      </div>
 
-      {error && <p className="error-banner">{error}</p>}
-      {tab === "sources" ? (
-        <div className="settings-stack">
-          <SlackSettings
-            busy={globalBusy || connectingSlack}
-            connections={slackConnections}
-            connect={connectSlack}
-            refresh={refreshSlack}
-            refreshWork={refresh}
-            setError={setError}
-          />
-          <NotionSettings
-            busy={globalBusy}
-            connections={notionConnections}
-            refresh={refreshNotion}
-            refreshWork={refresh}
-            setError={setError}
-          />
-          <GoogleSettings
-            busy={globalBusy}
-            connections={googleConnections}
-            refresh={refreshGoogle}
-            refreshWork={refresh}
-            setError={setError}
-          />
-          <GithubSettings
-            busy={globalBusy}
-            connections={githubConnections}
-            refresh={refreshGithub}
-            refreshWork={refresh}
-            setError={setError}
-          />
-          <GitlabSettings
-            busy={globalBusy}
-            connections={gitlabConnections}
-            refresh={refreshGitlab}
-            refreshWork={refresh}
-            setError={setError}
-          />
-        </div>
-      ) : tab === "settings" ? (
-        <GeneralSettings
-          settings={desktopSettings}
-          update={updateDesktopSetting}
-        />
-      ) : (
-        <DesktopSurface
-          data={dashboard}
-          layout={layout}
-          loading={initialLoading}
-          editing={editingLayout}
-          pendingWorkIds={pendingWorkIds}
-          onEdit={setEditingLayout}
-          onLayout={saveLayout}
-          onRun={run}
-          onOpen={open}
-          onSources={() => void selectTab("sources")}
-        />
+      {tab === "surface" && <ErrorBanner message={error} />}
+
+      <DesktopSurface
+        data={dashboard}
+        layout={layout}
+        loading={initialLoading}
+        editing={editingLayout}
+        pendingWorkIds={pendingWorkIds}
+        onEdit={setEditingLayout}
+        onLayout={saveLayout}
+        onRun={run}
+        onOpen={open}
+        onSources={() => void selectTab("sources")}
+      />
+
+      {tab !== "surface" && (
+        <SettingsOverlay
+          section={tab}
+          onSection={(next: SettingsSection) => void selectTab(next)}
+          onClose={() => void selectTab("surface")}
+        >
+          <ErrorBanner message={error} />
+          {tab === "sources" ? (
+            <div className="settings-stack">
+              <SlackSettings
+                busy={globalBusy || connectingSlack}
+                connections={slackConnections}
+                connect={connectSlack}
+                connectError={slackConnectError}
+                refresh={refreshSlack}
+                refreshWork={refresh}
+                setError={setError}
+              />
+              <NotionSettings
+                busy={globalBusy}
+                connections={notionConnections}
+                refresh={refreshNotion}
+                refreshWork={refresh}
+                setError={setError}
+              />
+              <GoogleSettings
+                busy={globalBusy}
+                connections={googleConnections}
+                refresh={refreshGoogle}
+                refreshWork={refresh}
+                setError={setError}
+              />
+              <GithubSettings
+                busy={globalBusy}
+                connections={githubConnections}
+                refresh={refreshGithub}
+                refreshWork={refresh}
+                setError={setError}
+              />
+              <GitlabSettings
+                busy={globalBusy}
+                connections={gitlabConnections}
+                refresh={refreshGitlab}
+                refreshWork={refresh}
+                setError={setError}
+              />
+            </div>
+          ) : (
+            <GeneralSettings
+              settings={desktopSettings}
+              update={updateDesktopSetting}
+            />
+          )}
+        </SettingsOverlay>
       )}
     </main>
   );
@@ -499,58 +557,109 @@ function NotionSettings({
 }) {
   const [token, setToken] = useState("");
   const [working, setWorking] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalError, setModalError] = useDismissingError();
+
+  function openModal() {
+    setToken("");
+    setModalError(null);
+    setModalOpen(true);
+  }
 
   async function connect() {
     setWorking(true);
     try {
-      setError(null);
+      setModalError(null);
       await glanceletApi.connectNotion(token);
       setToken("");
+      setModalOpen(false);
       await refresh();
     } catch (reason) {
-      setError(String(reason));
+      setModalError(String(reason));
     } finally {
       setWorking(false);
     }
   }
 
+  const tone = connectionTone(connections);
+
   return (
     <section className="source-settings" aria-label="Notion sources">
-      <div className="settings-heading notion-connect-heading">
+      <div className="settings-heading">
         <div>
-          <h2>Notion</h2>
+          <div className="source-title">
+            <span
+              className={`status-dot status-dot-${tone}`}
+              role="img"
+              aria-label={`Notion: ${connectionToneLabel(tone)}`}
+            />
+            <h2>Notion</h2>
+          </div>
           <p>Mirror tasks from a mapped Notion data source.</p>
         </div>
-        <div className="token-connect">
-          <input
-            aria-label="Notion Personal Access Token"
-            type="password"
-            autoComplete="off"
-            placeholder="Personal Access Token"
-            value={token}
-            onChange={(event) => setToken(event.target.value)}
-          />
-          <button
-            disabled={busy || working || token.trim() === ""}
-            onClick={() => void connect()}
-          >
-            Connect Notion
-          </button>
-        </div>
+        <button
+          className="btn-primary"
+          disabled={busy}
+          aria-label="Connect Notion"
+          onClick={openModal}
+        >
+          Connect
+        </button>
       </div>
-      {connections.length === 0 ? (
-        <div className="empty-source">No Notion account connected.</div>
-      ) : (
-        connections.map((connection) => (
-          <NotionConnectionCard
-            key={connection.connectionId}
-            connection={connection}
-            refresh={refresh}
-            refreshWork={refreshWork}
-            setError={setError}
-          />
-        ))
-      )}
+      <Modal
+        open={modalOpen}
+        title="Connect Notion"
+        onClose={() => setModalOpen(false)}
+      >
+        <form
+          className="modal-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void connect();
+          }}
+        >
+          <label className="modal-field">
+            <span>
+              Personal Access Token<span className="required-mark">*</span>
+            </span>
+            <input
+              aria-label="Notion Personal Access Token"
+              type="password"
+              autoComplete="off"
+              required
+              placeholder="secret_…"
+              value={token}
+              onChange={(event) => setToken(event.target.value)}
+            />
+          </label>
+          <ErrorBanner message={modalError} />
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="btn-quiet"
+              onClick={() => setModalOpen(false)}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={working || token.trim() === ""}
+            >
+              {working ? "Connecting…" : "Connect"}
+            </button>
+          </div>
+        </form>
+      </Modal>
+      {connections.map((connection) => (
+        <NotionConnectionCard
+          key={connection.connectionId}
+          connection={connection}
+          refresh={refresh}
+          refreshWork={refreshWork}
+          setError={setError}
+        />
+      ))}
     </section>
   );
 }
@@ -671,7 +780,7 @@ function NotionConnectionCard({
   )?.status;
 
   return (
-    <article className="source-card notion-card">
+    <article className="connection-card notion-card">
       <div className="source-identity">
         <strong>{connection.user}</strong>
         <span>{connection.status.replace("_", " ")}</span>
@@ -722,7 +831,7 @@ function NotionConnectionCard({
               {source.enabled ? "Disable" : "Enable"}
             </button>
             <button
-              className="danger"
+              className="btn-danger"
               disabled={working}
               onClick={() =>
                 void action(async () => {
@@ -897,6 +1006,7 @@ function NotionConnectionCard({
                   Preview
                 </button>
                 <button
+                  className="btn-primary"
                   disabled={working || settings() === null}
                   onClick={() =>
                     void action(async () => {
@@ -933,20 +1043,18 @@ function NotionConnectionCard({
           )}
         </div>
       )}
-      <div className="source-actions">
-        <button
-          className="danger"
-          disabled={working || connection.status === "disconnected"}
-          onClick={() =>
-            void action(async () => {
-              await glanceletApi.disconnectNotion(connection.connectionId);
-              await refresh();
-            })
-          }
-        >
-          Disconnect Notion
-        </button>
-      </div>
+      <button
+        className="disconnect-button btn-danger"
+        disabled={working || connection.status === "disconnected"}
+        onClick={() =>
+          void action(async () => {
+            await glanceletApi.disconnectNotion(connection.connectionId);
+            await refresh();
+          })
+        }
+      >
+        Disconnect Notion
+      </button>
     </article>
   );
 }
@@ -991,6 +1099,7 @@ function SlackSettings({
   busy,
   connections,
   connect,
+  connectError,
   refresh,
   refreshWork,
   setError,
@@ -998,34 +1107,46 @@ function SlackSettings({
   busy: boolean;
   connections: SlackConnection[];
   connect: () => Promise<void>;
+  connectError: string | null;
   refresh: (clearError?: boolean) => Promise<void>;
   refreshWork: (clearError?: boolean) => Promise<void>;
   setError: (error: string | null) => void;
 }) {
+  const tone = connectionTone(connections);
+
   return (
     <section className="source-settings" aria-label="Sources">
       <div className="settings-heading">
         <div>
-          <h2>Slack</h2>
+          <div className="source-title">
+            <span
+              className={`status-dot status-dot-${tone}`}
+              role="img"
+              aria-label={`Slack: ${connectionToneLabel(tone)}`}
+            />
+            <h2>Slack</h2>
+          </div>
           <p>Capture messages you react to with a configured emoji.</p>
         </div>
-        <button disabled={busy} onClick={() => void connect()}>
-          Connect Slack
+        <button
+          className="btn-primary"
+          disabled={busy}
+          aria-label="Connect Slack"
+          onClick={() => void connect()}
+        >
+          Connect
         </button>
       </div>
-      {connections.length === 0 ? (
-        <div className="empty-source">No Slack workspace connected.</div>
-      ) : (
-        connections.map((connection) => (
-          <SlackConnectionCard
-            key={connection.connectionId}
-            connection={connection}
-            refresh={refresh}
-            refreshWork={refreshWork}
-            setError={setError}
-          />
-        ))
-      )}
+      {connections.map((connection) => (
+        <SlackConnectionCard
+          key={connection.connectionId}
+          connection={connection}
+          refresh={refresh}
+          refreshWork={refreshWork}
+          setError={setError}
+        />
+      ))}
+      <ErrorBanner message={connectError} />
     </section>
   );
 }
@@ -1072,7 +1193,7 @@ function SlackConnectionCard({
   }
 
   return (
-    <article className="source-card">
+    <article className="connection-card">
       <div className="source-identity">
         <strong>{connection.workspace}</strong>
         <span>
@@ -1132,18 +1253,18 @@ function SlackConnectionCard({
             </button>
           </>
         )}
-        <button
-          className="danger"
-          disabled={working || connection.status === "disconnected"}
-          onClick={() =>
-            void action(() =>
-              glanceletApi.disconnectSlack(connection.connectionId),
-            )
-          }
-        >
-          Disconnect
-        </button>
       </div>
+      <button
+        className="disconnect-button btn-danger"
+        disabled={working || connection.status === "disconnected"}
+        onClick={() =>
+          void action(() =>
+            glanceletApi.disconnectSlack(connection.connectionId),
+          )
+        }
+      >
+        Disconnect Slack
+      </button>
     </article>
   );
 }

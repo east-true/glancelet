@@ -313,6 +313,27 @@ export function syncReportMessage(
   return failures.length > 0 ? failures.join("; ") : null;
 }
 
+export type ConnectionTone = "none" | "ok" | "attention";
+
+export function connectionTone(
+  connections: { status: "connected" | "reauth_required" | "disconnected" }[],
+): ConnectionTone {
+  if (connections.length === 0) return "none";
+  return connections.every((connection) => connection.status === "connected")
+    ? "ok"
+    : "attention";
+}
+
+const toneLabels: Record<ConnectionTone, string> = {
+  none: "not connected",
+  ok: "connected",
+  attention: "needs attention",
+};
+
+export function connectionToneLabel(tone: ConnectionTone): string {
+  return toneLabels[tone];
+}
+
 export const glanceletApi = {
   dashboard: () => invoke<WorkDashboard>("dashboard"),
   widgetLayout: () => invoke<WidgetInstance[]>("widget_layout"),

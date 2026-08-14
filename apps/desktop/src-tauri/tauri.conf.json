@@ -13,9 +13,9 @@
     "windows": [
       {
         "title": "Glancelet",
-        "width": 780,
-        "height": 760,
-        "minWidth": 380,
+        "width": 400,
+        "height": 640,
+        "minWidth": 340,
         "minHeight": 480,
         "resizable": true,
         "center": true

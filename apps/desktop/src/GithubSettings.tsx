@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  connectionTone,
+  connectionToneLabel,
   glanceletApi,
   syncReportMessage,
   type GithubConnection,
@@ -7,6 +9,8 @@ import {
   type GithubRepository,
   type GithubSource,
 } from "./api";
+import { ErrorBanner } from "./ErrorBanner";
+import { useDismissingError } from "./useDismissingError";
 
 const REVIEW_REQUESTS = "github.review_requests";
 const ASSIGNED_ISSUES = "github.assigned_issues";
@@ -27,6 +31,7 @@ export function GithubSettings({
   const [authorization, setAuthorization] =
     useState<GithubDeviceAuthorization | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [connectError, setConnectError] = useDismissingError();
   const activeSession = useRef<string | null>(null);
 
   useEffect(
@@ -42,14 +47,14 @@ export function GithubSettings({
     if (connecting) return;
     setConnecting(true);
     try {
-      setError(null);
+      setConnectError(null);
       const challenge = await glanceletApi.startGithubConnection();
       activeSession.current = challenge.sessionId;
       setAuthorization(challenge);
       void pollAuthorization(challenge);
     } catch (reason) {
       setConnecting(false);
-      setError(String(reason));
+      setConnectError(String(reason));
     }
   }
 
@@ -76,7 +81,7 @@ export function GithubSettings({
       if (activeSession.current === challenge.sessionId) {
         activeSession.current = null;
         setAuthorization(null);
-        setError(String(reason));
+        setConnectError(String(reason));
       }
     } finally {
       if (activeSession.current === null) setConnecting(false);
@@ -91,15 +96,29 @@ export function GithubSettings({
     if (sessionId) void glanceletApi.cancelGithubConnection(sessionId);
   }
 
+  const tone = connectionTone(connections);
+
   return (
     <section className="source-settings" aria-label="GitHub sources">
       <div className="source-heading">
         <div>
-          <h2>GitHub</h2>
+          <div className="source-title">
+            <span
+              className={`status-dot status-dot-${tone}`}
+              role="img"
+              aria-label={`GitHub: ${connectionToneLabel(tone)}`}
+            />
+            <h2>GitHub</h2>
+          </div>
           <p>Review requests, assigned issues, and workflow failures.</p>
         </div>
-        <button disabled={busy || connecting} onClick={() => void connect()}>
-          Connect GitHub
+        <button
+          className="btn-primary"
+          disabled={busy || connecting}
+          aria-label="Connect GitHub"
+          onClick={() => void connect()}
+        >
+          Connect
         </button>
       </div>
 
@@ -108,23 +127,22 @@ export function GithubSettings({
           <strong>Enter this code on GitHub</strong>
           <code>{authorization.userCode}</code>
           <span>{authorization.verificationUri}</span>
-          <button onClick={cancel}>Cancel</button>
+          <button className="btn-quiet" onClick={cancel}>
+            Cancel
+          </button>
         </div>
       )}
 
-      {connections.length === 0 ? (
-        <div className="empty-source">No GitHub account connected.</div>
-      ) : (
-        connections.map((connection) => (
-          <GithubConnectionCard
-            key={connection.connectionId}
-            connection={connection}
-            refresh={refresh}
-            refreshWork={refreshWork}
-            setError={setError}
-          />
-        ))
-      )}
+      {connections.map((connection) => (
+        <GithubConnectionCard
+          key={connection.connectionId}
+          connection={connection}
+          refresh={refresh}
+          refreshWork={refreshWork}
+          setError={setError}
+        />
+      ))}
+      <ErrorBanner message={connectError} />
     </section>
   );
 }
@@ -290,7 +308,7 @@ function GithubConnectionCard({
       )}
 
       <button
-        className="disconnect-button"
+        className="disconnect-button btn-danger"
         disabled={loading}
         onClick={() =>
           void act(
@@ -337,7 +355,11 @@ function GithubSourceRow({
         <button disabled={loading} onClick={() => void toggle()}>
           {source.enabled ? "Disable" : "Enable"}
         </button>
-        <button disabled={loading} onClick={() => void remove()}>
+        <button
+          className="btn-danger"
+          disabled={loading}
+          onClick={() => void remove()}
+        >
           Remove
         </button>
       </div>

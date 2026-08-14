@@ -1,10 +1,14 @@
 import { useState } from "react";
 import {
+  connectionTone,
+  connectionToneLabel,
   glanceletApi,
   syncReportMessage,
   type GoogleCalendar,
   type GoogleConnection,
 } from "./api";
+import { ErrorBanner } from "./ErrorBanner";
+import { useDismissingError } from "./useDismissingError";
 
 export function GoogleSettings({
   busy,
@@ -19,40 +23,53 @@ export function GoogleSettings({
   refreshWork: (clearError?: boolean) => Promise<void>;
   setError: (value: string | null) => void;
 }) {
+  const [connectError, setConnectError] = useDismissingError();
+
   async function connect() {
     try {
-      setError(null);
+      setConnectError(null);
       await glanceletApi.connectGoogle();
       await refresh();
     } catch (reason) {
-      setError(String(reason));
+      setConnectError(String(reason));
     }
   }
+
+  const tone = connectionTone(connections);
 
   return (
     <section className="source-settings" aria-label="Google Calendar sources">
       <div className="source-heading">
         <div>
-          <h2>Google Calendar</h2>
+          <div className="source-title">
+            <span
+              className={`status-dot status-dot-${tone}`}
+              role="img"
+              aria-label={`Google Calendar: ${connectionToneLabel(tone)}`}
+            />
+            <h2>Google Calendar</h2>
+          </div>
           <p>Mirror event occurrences from selected calendars.</p>
         </div>
-        <button disabled={busy} onClick={() => void connect()}>
-          Connect Google
+        <button
+          className="btn-primary"
+          disabled={busy}
+          aria-label="Connect Google"
+          onClick={() => void connect()}
+        >
+          Connect
         </button>
       </div>
-      {connections.length === 0 ? (
-        <div className="empty-source">No Google account connected.</div>
-      ) : (
-        connections.map((connection) => (
-          <GoogleConnectionCard
-            key={connection.connectionId}
-            connection={connection}
-            refresh={refresh}
-            refreshWork={refreshWork}
-            setError={setError}
-          />
-        ))
-      )}
+      {connections.map((connection) => (
+        <GoogleConnectionCard
+          key={connection.connectionId}
+          connection={connection}
+          refresh={refresh}
+          refreshWork={refreshWork}
+          setError={setError}
+        />
+      ))}
+      <ErrorBanner message={connectError} />
     </section>
   );
 }
@@ -163,6 +180,7 @@ function GoogleConnectionCard({
               {source.enabled ? "Disable" : "Enable"}
             </button>
             <button
+              className="btn-danger"
               disabled={loading}
               onClick={() =>
                 void act(() => glanceletApi.removeGoogleSource(source.sourceId))
@@ -218,7 +236,7 @@ function GoogleConnectionCard({
       )}
 
       <button
-        className="disconnect-button"
+        className="disconnect-button btn-danger"
         disabled={loading}
         onClick={() =>
           void act(

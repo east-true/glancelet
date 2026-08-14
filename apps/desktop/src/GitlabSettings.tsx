@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  connectionTone,
+  connectionToneLabel,
   glanceletApi,
   syncReportMessage,
   type GitlabConnection,
   type GitlabDeviceAuthorization,
 } from "./api";
+import { ErrorBanner } from "./ErrorBanner";
+import { Modal } from "./Modal";
+import { useDismissingError } from "./useDismissingError";
 
 export function GitlabSettings({
   busy,
@@ -24,6 +29,10 @@ export function GitlabSettings({
   const [connecting, setConnecting] = useState(false);
   const [instanceUrl, setInstanceUrl] = useState("https://gitlab.example.com");
   const [token, setToken] = useState("");
+  const [modalOpen, setModalOpen] = useState(false);
+  const [mode, setMode] = useState<"cloud" | "self-managed">("cloud");
+  const [selfManagedError, setSelfManagedError] = useDismissingError();
+  const [connectError, setConnectError] = useDismissingError();
   const activeSession = useRef<string | null>(null);
 
   useEffect(
@@ -39,14 +48,14 @@ export function GitlabSettings({
     if (connecting) return;
     setConnecting(true);
     try {
-      setError(null);
+      setConnectError(null);
       const challenge = await glanceletApi.startGitlabConnection();
       activeSession.current = challenge.sessionId;
       setAuthorization(challenge);
       void pollAuthorization(challenge);
     } catch (reason) {
       setConnecting(false);
-      setError(String(reason));
+      setConnectError(String(reason));
     }
   }
 
@@ -73,7 +82,7 @@ export function GitlabSettings({
       if (activeSession.current === challenge.sessionId) {
         activeSession.current = null;
         setAuthorization(null);
-        setError(String(reason));
+        setConnectError(String(reason));
       }
     } finally {
       if (activeSession.current === null) setConnecting(false);
@@ -88,33 +97,57 @@ export function GitlabSettings({
     if (sessionId) void glanceletApi.cancelGitlabConnection(sessionId);
   }
 
+  function openModal() {
+    setMode("cloud");
+    setToken("");
+    setSelfManagedError(null);
+    setModalOpen(true);
+  }
+
+  function closeModal() {
+    setToken("");
+    setModalOpen(false);
+  }
+
   async function connectPat() {
     if (connecting) return;
     setConnecting(true);
     try {
-      setError(null);
+      setSelfManagedError(null);
       await glanceletApi.connectGitlabPat(instanceUrl, token);
       setToken("");
+      setModalOpen(false);
       await refresh();
     } catch (reason) {
-      setError(String(reason));
+      setSelfManagedError(String(reason));
     } finally {
       setConnecting(false);
     }
   }
 
+  const tone = connectionTone(connections);
+
   return (
     <section className="source-settings" aria-label="GitLab sources">
       <div className="source-heading">
         <div>
-          <h2>GitLab</h2>
+          <div className="source-title">
+            <span
+              className={`status-dot status-dot-${tone}`}
+              role="img"
+              aria-label={`GitLab: ${connectionToneLabel(tone)}`}
+            />
+            <h2>GitLab</h2>
+          </div>
           <p>Pending GitLab To-Dos from GitLab.com or self-managed GitLab.</p>
         </div>
         <button
+          className="btn-primary"
           disabled={busy || connecting}
-          onClick={() => void connectGitlabCom()}
+          aria-label="Connect GitLab"
+          onClick={openModal}
         >
-          Connect GitLab.com
+          Connect
         </button>
       </div>
 
@@ -126,52 +159,134 @@ export function GitlabSettings({
             {authorization.verificationUriComplete ??
               authorization.verificationUri}
           </span>
-          <button onClick={cancel}>Cancel</button>
+          <button className="btn-quiet" onClick={cancel}>
+            Cancel
+          </button>
         </div>
       )}
 
-      <div className="source-card">
-        <strong>Self-managed GitLab</strong>
-        <label>
-          Instance URL
-          <input
-            aria-label="GitLab instance URL"
-            value={instanceUrl}
-            onChange={(event) => setInstanceUrl(event.target.value)}
-          />
-        </label>
-        <label>
-          Personal Access Token
-          <input
-            aria-label="GitLab Personal Access Token"
-            type="password"
-            autoComplete="off"
-            value={token}
-            onChange={(event) => setToken(event.target.value)}
-          />
-        </label>
-        <button
-          disabled={busy || connecting || !instanceUrl.trim() || !token.trim()}
-          onClick={() => void connectPat()}
-        >
-          Connect self-managed
-        </button>
-        <small>Requires an HTTPS instance and a PAT with read_api scope.</small>
-      </div>
+      <Modal open={modalOpen} title="Connect GitLab" onClose={closeModal}>
+        <div className="modal-form">
+          <div
+            className="mode-toggle"
+            role="tablist"
+            aria-label="GitLab connection method"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "cloud"}
+              className={mode === "cloud" ? "active" : ""}
+              onClick={() => setMode("cloud")}
+            >
+              GitLab.com
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "self-managed"}
+              className={mode === "self-managed" ? "active" : ""}
+              onClick={() => setMode("self-managed")}
+            >
+              Self-managed
+            </button>
+          </div>
 
-      {connections.length === 0 ? (
-        <div className="empty-source">No GitLab account connected.</div>
-      ) : (
-        connections.map((connection) => (
-          <GitlabConnectionCard
-            key={connection.connectionId}
-            connection={connection}
-            refresh={refresh}
-            refreshWork={refreshWork}
-            setError={setError}
-          />
-        ))
-      )}
+          {mode === "cloud" ? (
+            <>
+              <p className="modal-help">
+                Sign in with your GitLab.com account through a device code.
+              </p>
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="btn-quiet"
+                  onClick={closeModal}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  aria-label="Connect GitLab.com"
+                  disabled={busy || connecting}
+                  onClick={() => {
+                    setModalOpen(false);
+                    void connectGitlabCom();
+                  }}
+                >
+                  Connect
+                </button>
+              </div>
+            </>
+          ) : (
+            <form
+              className="modal-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void connectPat();
+              }}
+            >
+              <label className="modal-field">
+                <span>
+                  Instance URL<span className="required-mark">*</span>
+                </span>
+                <input
+                  aria-label="GitLab instance URL"
+                  required
+                  value={instanceUrl}
+                  onChange={(event) => setInstanceUrl(event.target.value)}
+                />
+              </label>
+              <label className="modal-field">
+                <span>
+                  Personal Access Token<span className="required-mark">*</span>
+                </span>
+                <input
+                  aria-label="GitLab Personal Access Token"
+                  type="password"
+                  autoComplete="off"
+                  required
+                  value={token}
+                  onChange={(event) => setToken(event.target.value)}
+                />
+              </label>
+              <small>
+                Requires an HTTPS instance and a PAT with read_api scope.
+              </small>
+              <ErrorBanner message={selfManagedError} />
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="btn-quiet"
+                  onClick={closeModal}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn-primary"
+                  aria-label="Connect self-managed GitLab"
+                  disabled={connecting || !instanceUrl.trim() || !token.trim()}
+                >
+                  {connecting ? "Connecting…" : "Connect"}
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
+      </Modal>
+
+      {connections.map((connection) => (
+        <GitlabConnectionCard
+          key={connection.connectionId}
+          connection={connection}
+          refresh={refresh}
+          refreshWork={refreshWork}
+          setError={setError}
+        />
+      ))}
+      <ErrorBanner message={connectError} />
     </section>
   );
 }
@@ -223,6 +338,7 @@ function GitlabConnectionCard({
       </div>
       {!connection.source ? (
         <button
+          className="btn-primary"
           disabled={working || connection.status === "disconnected"}
           onClick={() =>
             void act(() =>
@@ -265,6 +381,7 @@ function GitlabConnectionCard({
               {connection.source.enabled ? "Disable" : "Enable"}
             </button>
             <button
+              className="btn-danger"
               disabled={working}
               onClick={() =>
                 void act(
@@ -282,7 +399,7 @@ function GitlabConnectionCard({
         </div>
       )}
       <button
-        className="disconnect-button"
+        className="disconnect-button btn-danger"
         disabled={working || connection.status === "disconnected"}
         onClick={() =>
           void act(

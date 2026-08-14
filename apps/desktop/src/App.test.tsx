@@ -77,7 +77,7 @@ test("loads Slack settings through Tauri commands", async () => {
     .mockResolvedValueOnce([]);
   render(<App />);
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("dashboard"));
-  fireEvent.click(screen.getByRole("button", { name: "Sources" }));
+  fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
   await waitFor(() =>
     expect(mocks.invoke).toHaveBeenCalledWith("slack_connections"),
   );
@@ -85,11 +85,21 @@ test("loads Slack settings through Tauri commands", async () => {
   expect(mocks.invoke).toHaveBeenCalledWith("google_connections");
   expect(mocks.invoke).toHaveBeenCalledWith("github_connections");
   expect(mocks.invoke).toHaveBeenCalledWith("gitlab_connections");
-  expect(screen.getByText("No Slack workspace connected.")).toBeInTheDocument();
-  expect(screen.getByText("No Notion account connected.")).toBeInTheDocument();
-  expect(screen.getByText("No Google account connected.")).toBeInTheDocument();
-  expect(screen.getByText("No GitHub account connected.")).toBeInTheDocument();
-  expect(screen.getByText("No GitLab account connected.")).toBeInTheDocument();
+  expect(
+    screen.getByRole("img", { name: "Slack: not connected" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("img", { name: "Notion: not connected" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("img", { name: "Google Calendar: not connected" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("img", { name: "GitHub: not connected" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("img", { name: "GitLab: not connected" }),
+  ).toBeInTheDocument();
 });
 
 test("shows the GitLab Device Flow code without persisting it in the frontend", async () => {
@@ -110,7 +120,10 @@ test("shows the GitLab Device Flow code without persisting it in the frontend", 
     return Promise.resolve(undefined);
   });
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Connect GitLab" }),
+  );
   fireEvent.click(
     await screen.findByRole("button", { name: "Connect GitLab.com" }),
   );
@@ -129,7 +142,11 @@ test("connects a self-managed GitLab PAT through the Tauri boundary", async () =
     return Promise.resolve(undefined);
   });
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Connect GitLab" }),
+  );
+  fireEvent.click(await screen.findByRole("tab", { name: "Self-managed" }));
   fireEvent.change(
     await screen.findByRole("textbox", { name: "GitLab instance URL" }),
     { target: { value: "https://gitlab.example.com" } },
@@ -137,14 +154,20 @@ test("connects a self-managed GitLab PAT through the Tauri boundary", async () =
   fireEvent.change(screen.getByLabelText("GitLab Personal Access Token"), {
     target: { value: "dummy-pat-from-user" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "Connect self-managed" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Connect self-managed GitLab" }),
+  );
   await waitFor(() =>
     expect(mocks.invoke).toHaveBeenCalledWith("connect_gitlab_pat", {
       instanceUrl: "https://gitlab.example.com",
       token: "dummy-pat-from-user",
     }),
   );
-  expect(screen.getByLabelText("GitLab Personal Access Token")).toHaveValue("");
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "Connect GitLab" }),
+    ).not.toBeInTheDocument(),
+  );
 });
 
 test("adds GitLab To-Dos under the existing instance-scoped Connection", async () => {
@@ -177,7 +200,7 @@ test("adds GitLab To-Dos under the existing instance-scoped Connection", async (
     return Promise.resolve(undefined);
   });
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
   fireEvent.click(
     await screen.findByRole("button", { name: "Add GitLab To-Dos" }),
   );
@@ -231,7 +254,7 @@ test("runs the GitLab To-Dos source lifecycle through Tauri commands", async () 
     return Promise.resolve(undefined);
   });
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
   expect(
     await screen.findByText("GitLab To-Dos · gitlab.example.com"),
   ).toBeInTheDocument();
@@ -287,7 +310,7 @@ test("shows the GitHub Device Flow code while authorization is pending", async (
     return Promise.resolve(undefined);
   });
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
   fireEvent.click(
     await screen.findByRole("button", { name: "Connect GitHub" }),
   );
@@ -334,7 +357,7 @@ test("configures global and repository-scoped GitHub sources", async () => {
     return Promise.resolve(payload);
   });
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
   fireEvent.click(
     await screen.findByRole("button", { name: "Refresh repositories" }),
   );
@@ -399,7 +422,7 @@ test("runs the GitHub source lifecycle through Tauri commands", async () => {
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
   expect(await screen.findByText("GitHub Review Requests")).toBeInTheDocument();
   expect(screen.getByText(/Last sync:/)).toBeInTheDocument();
 
@@ -503,7 +526,7 @@ test("maps a Notion data source by property id and previews without storing the 
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
   await screen.findByText("Tester");
   fireEvent.change(screen.getByLabelText("Notion Data Source ID"), {
     target: { value: "ds-1" },
@@ -572,7 +595,7 @@ test("selects multiple calendars for one Google connection", async () => {
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
   await screen.findByText("user@example.com");
   fireEvent.click(screen.getByRole("button", { name: "Refresh calendars" }));
   await screen.findByLabelText("Work");
@@ -620,7 +643,7 @@ test("manages a Google Calendar source through generic source commands", async (
     return Promise.resolve(undefined);
   });
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
   await screen.findByText("Work");
   fireEvent.click(screen.getByRole("button", { name: "Sync now" }));
   await waitFor(() =>
@@ -735,7 +758,7 @@ test("does not send assigned-to-me mode without an assignee mapping", async () =
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
   await screen.findByText("Tester");
   fireEvent.change(screen.getByLabelText("Notion Data Source ID"), {
     target: { value: "ds-1" },
@@ -955,10 +978,10 @@ test("refreshes the HUD after a Slack source sync", async () => {
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
   await screen.findByText("Example workspace");
   fireEvent.click(screen.getByRole("button", { name: "Sync now" }));
-  fireEvent.click(screen.getByRole("button", { name: "Surface" }));
+  fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 
   await screen.findByText("Captured after Slack sync");
   expect(mocks.invoke).toHaveBeenCalledWith("sync_source", {
@@ -1005,6 +1028,7 @@ test("persists opt-in desktop settings through Tauri commands", async () => {
   });
 
   render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
   fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
   const always = await screen.findByRole("checkbox", { name: /Always on Top/ });
   const autostart = screen.getByRole("checkbox", {
@@ -1050,7 +1074,7 @@ test("persists Widget additions through the layout command", async () => {
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Edit Layout" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Edit layout" }));
   fireEvent.click(screen.getByRole("button", { name: /Upcoming.*Add/ }));
 
   await waitFor(() =>

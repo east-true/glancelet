@@ -152,18 +152,9 @@ export function DesktopSurface({
   return (
     <section className="desktop-surface" aria-label="Desktop Surface">
       <div className="surface-toolbar">
-        <div>
-          <p className="surface-kicker">Desktop Surface</p>
-          <p className="surface-summary">
-            {workCount === 0 ? "Quiet right now" : `${workCount} items in view`}
-          </p>
-        </div>
-        <button
-          className={editing ? "active" : ""}
-          onClick={() => onEdit(!editing)}
-        >
-          {editing ? "Done" : "Edit Layout"}
-        </button>
+        <p className="surface-summary">
+          {workCount === 0 ? "Quiet right now" : `${workCount} items in view`}
+        </p>
       </div>
 
       {data.sourceHealth.issues.length > 0 && (
@@ -191,7 +182,9 @@ export function DesktopSurface({
           <p>
             Connect a source to start collecting work that needs your attention.
           </p>
-          <button onClick={onSources}>Connect a Source</button>
+          <button className="btn-primary" onClick={onSources}>
+            Connect a Source
+          </button>
         </div>
       )}
 

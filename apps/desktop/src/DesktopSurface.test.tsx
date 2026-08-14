@@ -73,18 +73,23 @@ function SurfaceHarness({ data = dashboard() }: { data?: WorkDashboard }) {
   const [editing, setEditing] = useState(false);
   const [layout, setLayout] = useState(defaultLayout);
   return (
-    <DesktopSurface
-      data={data}
-      layout={layout}
-      loading={false}
-      editing={editing}
-      pendingWorkIds={new Set()}
-      onEdit={setEditing}
-      onLayout={async (next) => setLayout(next)}
-      onRun={async () => undefined}
-      onOpen={async () => undefined}
-      onSources={() => undefined}
-    />
+    <>
+      <button onClick={() => setEditing(!editing)}>
+        {editing ? "Done" : "Edit Layout"}
+      </button>
+      <DesktopSurface
+        data={data}
+        layout={layout}
+        loading={false}
+        editing={editing}
+        pendingWorkIds={new Set()}
+        onEdit={setEditing}
+        onLayout={async (next) => setLayout(next)}
+        onRun={async () => undefined}
+        onOpen={async () => undefined}
+        onSources={() => undefined}
+      />
+    </>
   );
 }
 
