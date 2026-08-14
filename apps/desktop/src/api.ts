@@ -352,6 +352,33 @@ function latestSnapshot<T>(read: () => Promise<T>): () => Promise<T> {
   };
 }
 
+function consistentResource<T>() {
+  let mutationGeneration = 0;
+  const mutations = new Set<Promise<unknown>>();
+
+  async function read(snapshot: () => Promise<T>): Promise<T> {
+    while (true) {
+      const generation = mutationGeneration;
+      const value = await snapshot();
+      if (generation === mutationGeneration && mutations.size === 0) {
+        return value;
+      }
+      await Promise.allSettled([...mutations]);
+    }
+  }
+
+  function mutate<R>(operation: () => Promise<R>): Promise<R> {
+    mutationGeneration += 1;
+    const current = operation();
+    mutations.add(current);
+    void current.finally(() => mutations.delete(current));
+    return current;
+  }
+
+  return { read, mutate };
+}
+
+const desktopSettingsResource = consistentResource<DesktopSettings>();
 const readSlackConnections = latestSnapshot(() =>
   invoke<SlackConnection[]>("slack_connections"),
 );
@@ -373,11 +400,18 @@ export const glanceletApi = {
   widgetLayout: () => invoke<WidgetInstance[]>("widget_layout"),
   saveWidgetLayout: (widgets: WidgetInstance[]) =>
     invoke<void>("save_widget_layout", { widgets }),
-  desktopSettings: () => invoke<DesktopSettings>("desktop_settings"),
+  desktopSettings: () =>
+    desktopSettingsResource.read(() =>
+      invoke<DesktopSettings>("desktop_settings"),
+    ),
   setAlwaysOnTop: (enabled: boolean) =>
-    invoke<void>("set_always_on_top", { enabled }),
+    desktopSettingsResource.mutate(() =>
+      invoke<void>("set_always_on_top", { enabled }),
+    ),
   setLaunchAtStartup: (enabled: boolean) =>
-    invoke<void>("set_launch_at_startup", { enabled }),
+    desktopSettingsResource.mutate(() =>
+      invoke<void>("set_launch_at_startup", { enabled }),
+    ),
   sync: () => invoke<SyncReport>("sync_all"),
   slackConnections: readSlackConnections,
   connectSlack: () => invoke<void>("connect_slack"),
