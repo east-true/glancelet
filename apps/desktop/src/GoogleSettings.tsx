@@ -23,15 +23,20 @@ export function GoogleSettings({
   refreshWork: (clearError?: boolean) => Promise<void>;
   setError: (value: string | null) => void;
 }) {
+  const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useDismissingError();
 
   async function connect() {
+    if (connecting) return;
+    setConnecting(true);
     try {
       setConnectError(null);
       await glanceletApi.connectGoogle();
       await refresh();
     } catch (reason) {
       setConnectError(String(reason));
+    } finally {
+      setConnecting(false);
     }
   }
 
@@ -53,7 +58,7 @@ export function GoogleSettings({
         </div>
         <button
           className="btn-primary"
-          disabled={busy}
+          disabled={busy || connecting}
           aria-label="Connect Google"
           onClick={() => void connect()}
         >
