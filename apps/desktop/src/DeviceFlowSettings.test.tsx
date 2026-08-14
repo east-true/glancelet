@@ -101,6 +101,39 @@ test("keeps a GitHub device session active after StrictMode effect replay", asyn
   ).toHaveLength(0);
 });
 
+test("shows a GitHub refresh failure after device authorization succeeds", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "start_github_connection") {
+      return Promise.resolve({
+        sessionId: "github-refresh-session",
+        userCode: "REFRESH-GH",
+        verificationUri: "https://github.com/login/device",
+        retryAfterSeconds: 0,
+      });
+    }
+    if (command === "poll_github_connection") {
+      return Promise.resolve({ status: "authorized", retryAfterSeconds: null });
+    }
+    return Promise.resolve(undefined);
+  });
+  const refresh = vi.fn().mockRejectedValue(new Error("GitHub refresh failed"));
+
+  render(
+    <GithubSettings
+      busy={false}
+      connections={[]}
+      refresh={refresh}
+      refreshWork={vi.fn().mockResolvedValue(undefined)}
+      setError={vi.fn()}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
+
+  expect(await screen.findByText(/GitHub refresh failed/)).toBeInTheDocument();
+  expect(refresh).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("button", { name: "Connect GitHub" })).toBeEnabled();
+});
+
 test("cancels a GitLab device session that starts after unmount", async () => {
   const start = deferred<{
     sessionId: string;
@@ -181,4 +214,39 @@ test("keeps a GitLab device session active after StrictMode effect replay", asyn
       ([command]) => command === "cancel_gitlab_connection",
     ),
   ).toHaveLength(0);
+});
+
+test("shows a GitLab refresh failure after device authorization succeeds", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "start_gitlab_connection") {
+      return Promise.resolve({
+        sessionId: "gitlab-refresh-session",
+        userCode: "REFRESH-GL",
+        verificationUri: "https://gitlab.com/oauth/device",
+        verificationUriComplete: null,
+        retryAfterSeconds: 0,
+      });
+    }
+    if (command === "poll_gitlab_connection") {
+      return Promise.resolve({ status: "authorized", retryAfterSeconds: null });
+    }
+    return Promise.resolve(undefined);
+  });
+  const refresh = vi.fn().mockRejectedValue(new Error("GitLab refresh failed"));
+
+  render(
+    <GitlabSettings
+      busy={false}
+      connections={[]}
+      refresh={refresh}
+      refreshWork={vi.fn().mockResolvedValue(undefined)}
+      setError={vi.fn()}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Connect GitLab" }));
+  fireEvent.click(screen.getByRole("button", { name: "Connect GitLab.com" }));
+
+  expect(await screen.findByText(/GitLab refresh failed/)).toBeInTheDocument();
+  expect(refresh).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("button", { name: "Connect GitLab" })).toBeEnabled();
 });

@@ -79,7 +79,11 @@ export function GithubSettings({
         if (result.status === "authorized") {
           activeSession.current = null;
           setAuthorization(null);
-          await refresh();
+          try {
+            await refresh();
+          } catch (reason) {
+            if (mounted.current) setConnectError(String(reason));
+          }
           return;
         }
         delaySeconds = result.retryAfterSeconds ?? delaySeconds;
