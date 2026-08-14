@@ -371,7 +371,10 @@ function consistentResource<T>() {
     mutationGeneration += 1;
     const current = operation();
     mutations.add(current);
-    void current.finally(() => mutations.delete(current));
+    void current.then(
+      () => mutations.delete(current),
+      () => mutations.delete(current),
+    );
     return current;
   }
 
