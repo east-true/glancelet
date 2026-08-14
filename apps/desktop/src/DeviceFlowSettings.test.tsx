@@ -5,6 +5,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { GithubSettings } from "./GithubSettings";
 import { GitlabSettings } from "./GitlabSettings";
@@ -66,6 +67,40 @@ test("cancels a GitHub device session that starts after unmount", async () => {
   ).toHaveLength(0);
 });
 
+test("keeps a GitHub device session active after StrictMode effect replay", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "start_github_connection") {
+      return Promise.resolve({
+        sessionId: "github-strict-session",
+        userCode: "STRICT-GH",
+        verificationUri: "https://github.com/login/device",
+        retryAfterSeconds: 60,
+      });
+    }
+    return Promise.resolve(undefined);
+  });
+
+  render(
+    <StrictMode>
+      <GithubSettings
+        busy={false}
+        connections={[]}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        refreshWork={vi.fn().mockResolvedValue(undefined)}
+        setError={vi.fn()}
+      />
+    </StrictMode>,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
+
+  expect(await screen.findByText("STRICT-GH")).toBeInTheDocument();
+  expect(
+    mocks.invoke.mock.calls.filter(
+      ([command]) => command === "cancel_github_connection",
+    ),
+  ).toHaveLength(0);
+});
+
 test("cancels a GitLab device session that starts after unmount", async () => {
   const start = deferred<{
     sessionId: string;
@@ -108,6 +143,42 @@ test("cancels a GitLab device session that starts after unmount", async () => {
   expect(
     mocks.invoke.mock.calls.filter(
       ([command]) => command === "poll_gitlab_connection",
+    ),
+  ).toHaveLength(0);
+});
+
+test("keeps a GitLab device session active after StrictMode effect replay", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "start_gitlab_connection") {
+      return Promise.resolve({
+        sessionId: "gitlab-strict-session",
+        userCode: "STRICT-GL",
+        verificationUri: "https://gitlab.com/oauth/device",
+        verificationUriComplete: null,
+        retryAfterSeconds: 60,
+      });
+    }
+    return Promise.resolve(undefined);
+  });
+
+  render(
+    <StrictMode>
+      <GitlabSettings
+        busy={false}
+        connections={[]}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        refreshWork={vi.fn().mockResolvedValue(undefined)}
+        setError={vi.fn()}
+      />
+    </StrictMode>,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Connect GitLab" }));
+  fireEvent.click(screen.getByRole("button", { name: "Connect GitLab.com" }));
+
+  expect(await screen.findByText("STRICT-GL")).toBeInTheDocument();
+  expect(
+    mocks.invoke.mock.calls.filter(
+      ([command]) => command === "cancel_gitlab_connection",
     ),
   ).toHaveLength(0);
 });

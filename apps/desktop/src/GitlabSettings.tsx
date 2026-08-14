@@ -36,15 +36,15 @@ export function GitlabSettings({
   const activeSession = useRef<string | null>(null);
   const mounted = useRef(true);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
       mounted.current = false;
       const sessionId = activeSession.current;
       activeSession.current = null;
       if (sessionId) void glanceletApi.cancelGitlabConnection(sessionId);
-    },
-    [],
-  );
+    };
+  }, []);
 
   async function connectGitlabCom() {
     if (connecting) return;
