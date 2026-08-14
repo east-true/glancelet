@@ -46,7 +46,12 @@ test("re-reads desktop settings when a write starts during an older read", async
   );
   mocks.invoke.mockImplementation((command: string) => {
     if (command === "dashboard") {
-      return Promise.resolve({ today: [], inbox: [], upcoming: [], attention: [] });
+      return Promise.resolve({
+        today: [],
+        inbox: [],
+        upcoming: [],
+        attention: [],
+      });
     }
     if (command === "widget_layout") return Promise.resolve(undefined);
     if (
@@ -61,7 +66,10 @@ test("re-reads desktop settings when a write starts during an older read", async
     if (command === "desktop_settings") {
       settingsReads += 1;
       if (settingsReads === 1) {
-        return Promise.resolve({ alwaysOnTop: false, launchAtStartup: false });
+        return Promise.resolve({
+          alwaysOnTop: false,
+          launchAtStartup: false,
+        });
       }
       if (settingsReads === 2) return staleRead.promise;
       return Promise.resolve({ alwaysOnTop: true, launchAtStartup: true });
@@ -71,10 +79,14 @@ test("re-reads desktop settings when a write starts during an older read", async
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Open settings" }),
+  );
   fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
 
-  const always = await screen.findByRole("checkbox", { name: /Always on Top/ });
+  const always = await screen.findByRole("checkbox", {
+    name: /Always on Top/,
+  });
   const startup = screen.getByRole("checkbox", {
     name: /Launch Glancelet at startup/,
   });
