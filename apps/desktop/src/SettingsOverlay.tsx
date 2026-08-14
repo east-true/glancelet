@@ -61,10 +61,7 @@ export function SettingsOverlay({
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
       const active = document.activeElement;
-      if (
-        event.shiftKey &&
-        (active === first || !dialog.contains(active))
-      ) {
+      if (event.shiftKey && (active === first || !dialog.contains(active))) {
         event.preventDefault();
         last.focus();
       } else if (
