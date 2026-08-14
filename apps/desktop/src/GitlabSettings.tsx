@@ -129,7 +129,11 @@ export function GitlabSettings({
       await glanceletApi.connectGitlabPat(instanceUrl, token);
       setToken("");
       setModalOpen(false);
-      await refresh();
+      try {
+        await refresh();
+      } catch (reason) {
+        setConnectError(String(reason));
+      }
     } catch (reason) {
       setSelfManagedError(String(reason));
     } finally {
