@@ -27,7 +27,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-test("re-reads desktop settings when a write starts during an older read", async () => {
+test("re-reads settings after an overlapping write", async () => {
   const staleRead = deferred<{
     alwaysOnTop: boolean;
     launchAtStartup: boolean;
@@ -79,9 +79,7 @@ test("re-reads desktop settings when a write starts during an older read", async
   });
 
   render(<App />);
-  fireEvent.click(
-    await screen.findByRole("button", { name: "Open settings" }),
-  );
+  fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
   fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
 
   const always = await screen.findByRole("checkbox", {
