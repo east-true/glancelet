@@ -92,43 +92,44 @@ test(
       "compact",
     );
 
-    await act(async () =>
-      second.reject(new Error("second layout save failed")),
-    );
+    await act(async () => second.reject(new Error("second layout save failed")));
 
     await waitFor(() => expect(resize).toHaveTextContent("tall"));
     expect(screen.getByText(/second layout save failed/)).toBeInTheDocument();
   },
 );
 
-test("keeps the latest layout intent when an older queued save fails", async () => {
-  const first = deferred<void>();
-  const second = deferred<void>();
-  const saved: WidgetInstance[][] = [];
-  mockApp((widgets) => {
-    saved.push(widgets);
-    return saved.length === 1 ? first.promise : second.promise;
-  });
+test(
+  "keeps the latest layout intent when an older queued save fails",
+  async () => {
+    const first = deferred<void>();
+    const second = deferred<void>();
+    const saved: WidgetInstance[][] = [];
+    mockApp((widgets) => {
+      saved.push(widgets);
+      return saved.length === 1 ? first.promise : second.promise;
+    });
 
-  render(<App />);
-  const resize = await enterEditMode();
+    render(<App />);
+    const resize = await enterEditMode();
 
-  fireEvent.click(resize);
-  await waitFor(() => expect(resize).toHaveTextContent("tall"));
-  fireEvent.click(resize);
-  await waitFor(() => expect(resize).toHaveTextContent("compact"));
-  expect(saved).toHaveLength(1);
+    fireEvent.click(resize);
+    await waitFor(() => expect(resize).toHaveTextContent("tall"));
+    fireEvent.click(resize);
+    await waitFor(() => expect(resize).toHaveTextContent("compact"));
+    expect(saved).toHaveLength(1);
 
-  await act(async () => first.reject(new Error("first layout save failed")));
-  await waitFor(() => expect(saved).toHaveLength(2));
-  expect(resize).toHaveTextContent("compact");
+    await act(async () => first.reject(new Error("first layout save failed")));
+    await waitFor(() => expect(saved).toHaveLength(2));
+    expect(resize).toHaveTextContent("compact");
 
-  await act(async () => second.resolve(undefined));
-  expect(resize).toHaveTextContent("compact");
-  expect(
-    screen.queryByText(/first layout save failed/),
-  ).not.toBeInTheDocument();
-});
+    await act(async () => second.resolve(undefined));
+    expect(resize).toHaveTextContent("compact");
+    expect(
+      screen.queryByText(/first layout save failed/),
+    ).not.toBeInTheDocument();
+  },
+);
 
 test(
   "does not allow layout editing before persisted layout hydration completes",
