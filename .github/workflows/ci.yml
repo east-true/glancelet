@@ -125,6 +125,11 @@ jobs:
           cache: npm
       - name: Install frontend dependencies
         run: npm ci
+      - name: Diagnose Notion preview test formatting
+        run: |
+          npx prettier --write apps/desktop/src/NotionPreviewConsistency.test.tsx
+          git diff -- apps/desktop/src/NotionPreviewConsistency.test.tsx
+          exit 1
       - name: Check frontend formatting
         run: npm run format:check
       - name: Lint frontend
