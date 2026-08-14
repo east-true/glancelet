@@ -35,15 +35,15 @@ export function GithubSettings({
   const activeSession = useRef<string | null>(null);
   const mounted = useRef(true);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
       mounted.current = false;
       const sessionId = activeSession.current;
       activeSession.current = null;
       if (sessionId) void glanceletApi.cancelGithubConnection(sessionId);
-    },
-    [],
-  );
+    };
+  }, []);
 
   async function connect() {
     if (connecting) return;
