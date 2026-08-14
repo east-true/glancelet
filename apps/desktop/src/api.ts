@@ -334,6 +334,40 @@ export function connectionToneLabel(tone: ConnectionTone): string {
   return toneLabels[tone];
 }
 
+function latestSnapshot<T>(read: () => Promise<T>): () => Promise<T> {
+  let generation = 0;
+  let latest: Promise<T> | undefined;
+
+  return async () => {
+    const request = ++generation;
+    const current = read();
+    latest = current;
+    try {
+      const value = await current;
+      if (request === generation) return value;
+    } catch (reason) {
+      if (request === generation) throw reason;
+    }
+    return await latest;
+  };
+}
+
+const readSlackConnections = latestSnapshot(() =>
+  invoke<SlackConnection[]>("slack_connections"),
+);
+const readNotionConnections = latestSnapshot(() =>
+  invoke<NotionConnection[]>("notion_connections"),
+);
+const readGoogleConnections = latestSnapshot(() =>
+  invoke<GoogleConnection[]>("google_connections"),
+);
+const readGithubConnections = latestSnapshot(() =>
+  invoke<GithubConnection[]>("github_connections"),
+);
+const readGitlabConnections = latestSnapshot(() =>
+  invoke<GitlabConnection[]>("gitlab_connections"),
+);
+
 export const glanceletApi = {
   dashboard: () => invoke<WorkDashboard>("dashboard"),
   widgetLayout: () => invoke<WidgetInstance[]>("widget_layout"),
@@ -345,7 +379,7 @@ export const glanceletApi = {
   setLaunchAtStartup: (enabled: boolean) =>
     invoke<void>("set_launch_at_startup", { enabled }),
   sync: () => invoke<SyncReport>("sync_all"),
-  slackConnections: () => invoke<SlackConnection[]>("slack_connections"),
+  slackConnections: readSlackConnections,
   connectSlack: () => invoke<void>("connect_slack"),
   syncSource: (sourceId: string) =>
     invoke<SyncReport>("sync_source", { sourceId }),
@@ -361,7 +395,7 @@ export const glanceletApi = {
     }),
   disconnectSlack: (connectionId: string) =>
     invoke<void>("disconnect_slack", { connectionId }),
-  notionConnections: () => invoke<NotionConnection[]>("notion_connections"),
+  notionConnections: readNotionConnections,
   connectNotion: (token: string) => invoke<void>("connect_notion", { token }),
   searchNotionDataSources: (connectionId: string, query: string) =>
     invoke<NotionDataSourceSummary[]>("search_notion_data_sources", {
@@ -394,7 +428,7 @@ export const glanceletApi = {
     invoke<void>("remove_notion_source", { sourceId }),
   disconnectNotion: (connectionId: string) =>
     invoke<void>("disconnect_notion", { connectionId }),
-  googleConnections: () => invoke<GoogleConnection[]>("google_connections"),
+  googleConnections: readGoogleConnections,
   connectGoogle: () => invoke<void>("connect_google"),
   googleCalendars: (connectionId: string) =>
     invoke<GoogleCalendar[]>("google_calendars", { connectionId }),
@@ -409,7 +443,7 @@ export const glanceletApi = {
     invoke<void>("remove_google_source", { sourceId }),
   disconnectGoogle: (connectionId: string) =>
     invoke<void>("disconnect_google", { connectionId }),
-  githubConnections: () => invoke<GithubConnection[]>("github_connections"),
+  githubConnections: readGithubConnections,
   startGithubConnection: () =>
     invoke<GithubDeviceAuthorization>("start_github_connection"),
   pollGithubConnection: (sessionId: string) =>
@@ -434,7 +468,7 @@ export const glanceletApi = {
     invoke<void>("remove_github_source", { sourceId }),
   disconnectGithub: (connectionId: string) =>
     invoke<void>("disconnect_github", { connectionId }),
-  gitlabConnections: () => invoke<GitlabConnection[]>("gitlab_connections"),
+  gitlabConnections: readGitlabConnections,
   startGitlabConnection: () =>
     invoke<GitlabDeviceAuthorization>("start_gitlab_connection"),
   pollGitlabConnection: (sessionId: string) =>
