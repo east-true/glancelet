@@ -1,4 +1,11 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "./App";
 import type { SlackConnection } from "./api";
@@ -50,7 +57,12 @@ test("ignores a stale provider refresh after a newer source update", async () =>
   );
   mocks.invoke.mockImplementation((command: string) => {
     if (command === "dashboard") {
-      return Promise.resolve({ today: [], inbox: [], upcoming: [], attention: [] });
+      return Promise.resolve({
+        today: [],
+        inbox: [],
+        upcoming: [],
+        attention: [],
+      });
     }
     if (command === "widget_layout") return Promise.resolve(undefined);
     if (command === "slack_connections") {
