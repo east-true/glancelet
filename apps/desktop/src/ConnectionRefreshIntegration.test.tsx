@@ -64,12 +64,16 @@ test("surfaces GitHub refresh failures through App", async () => {
 
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
-  fireEvent.click(await screen.findByRole("button", { name: "Connect GitHub" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Connect GitHub" }),
+  );
 
   expect(await screen.findByText(/GitHub refresh failed/)).toBeInTheDocument();
   expect(githubReads).toBe(2);
   await waitFor(() =>
-    expect(screen.getByRole("button", { name: "Connect GitHub" })).toBeEnabled(),
+    expect(
+      screen.getByRole("button", { name: "Connect GitHub" }),
+    ).toBeEnabled(),
   );
 });
 
@@ -97,7 +101,9 @@ test("surfaces GitLab PAT refresh failures through App", async () => {
 
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
-  fireEvent.click(await screen.findByRole("button", { name: "Connect GitLab" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Connect GitLab" }),
+  );
   fireEvent.click(await screen.findByRole("tab", { name: "Self-managed" }));
   fireEvent.change(
     screen.getByRole("textbox", { name: "GitLab instance URL" }),
