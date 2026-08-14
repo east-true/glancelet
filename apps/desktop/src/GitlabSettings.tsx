@@ -97,7 +97,8 @@ export function GitlabSettings({
         setConnectError(String(reason));
       }
     } finally {
-      if (mounted.current && activeSession.current === null) setConnecting(false);
+      if (mounted.current && activeSession.current === null)
+        setConnecting(false);
     }
   }
 
