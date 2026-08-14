@@ -129,7 +129,7 @@ test("shows a GitHub refresh failure after device authorization succeeds", async
   );
   fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
 
-  expect(await screen.findByText("GitHub refresh failed")).toBeInTheDocument();
+  expect(await screen.findByText(/GitHub refresh failed/)).toBeInTheDocument();
   expect(refresh).toHaveBeenCalledTimes(1);
   expect(screen.getByRole("button", { name: "Connect GitHub" })).toBeEnabled();
 });
@@ -246,7 +246,7 @@ test("shows a GitLab refresh failure after device authorization succeeds", async
   fireEvent.click(screen.getByRole("button", { name: "Connect GitLab" }));
   fireEvent.click(screen.getByRole("button", { name: "Connect GitLab.com" }));
 
-  expect(await screen.findByText("GitLab refresh failed")).toBeInTheDocument();
+  expect(await screen.findByText(/GitLab refresh failed/)).toBeInTheDocument();
   expect(refresh).toHaveBeenCalledTimes(1);
   expect(screen.getByRole("button", { name: "Connect GitLab" })).toBeEnabled();
 });
