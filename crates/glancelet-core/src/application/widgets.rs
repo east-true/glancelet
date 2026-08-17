@@ -62,10 +62,22 @@ pub fn default_widget_layout() -> Vec<WidgetInstance> {
     ]
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopPreferences {
     pub always_on_top: bool,
+    pub global_shortcut_enabled: bool,
+    pub privacy_mode: bool,
+}
+
+impl Default for DesktopPreferences {
+    fn default() -> Self {
+        Self {
+            always_on_top: false,
+            global_shortcut_enabled: true,
+            privacy_mode: false,
+        }
+    }
 }
 
 pub struct WidgetLayoutService {
@@ -101,7 +113,22 @@ impl WidgetLayoutService {
     }
 
     pub fn set_always_on_top(&self, always_on_top: bool) -> Result<DesktopPreferences> {
-        let preferences = DesktopPreferences { always_on_top };
+        let mut preferences = self.preferences()?;
+        preferences.always_on_top = always_on_top;
+        self.store.save_desktop_preferences(&preferences)?;
+        Ok(preferences)
+    }
+
+    pub fn set_global_shortcut_enabled(&self, enabled: bool) -> Result<DesktopPreferences> {
+        let mut preferences = self.preferences()?;
+        preferences.global_shortcut_enabled = enabled;
+        self.store.save_desktop_preferences(&preferences)?;
+        Ok(preferences)
+    }
+
+    pub fn set_privacy_mode(&self, enabled: bool) -> Result<DesktopPreferences> {
+        let mut preferences = self.preferences()?;
+        preferences.privacy_mode = enabled;
         self.store.save_desktop_preferences(&preferences)?;
         Ok(preferences)
     }

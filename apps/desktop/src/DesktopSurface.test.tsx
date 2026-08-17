@@ -69,7 +69,13 @@ function dashboard(overrides: Partial<WorkDashboard> = {}): WorkDashboard {
   };
 }
 
-function SurfaceHarness({ data = dashboard() }: { data?: WorkDashboard }) {
+function SurfaceHarness({
+  data = dashboard(),
+  onCapture = () => undefined,
+}: {
+  data?: WorkDashboard;
+  onCapture?: () => void;
+}) {
   const [editing, setEditing] = useState(false);
   const [layout, setLayout] = useState(defaultLayout);
   return (
@@ -88,15 +94,18 @@ function SurfaceHarness({ data = dashboard() }: { data?: WorkDashboard }) {
         onRun={async () => undefined}
         onOpen={async () => undefined}
         onSources={() => undefined}
+        onCapture={onCapture}
       />
     </>
   );
 }
 
-test("shows product empty states and first-run source CTA", () => {
+test("shows product empty states and first-run capture and source CTAs", () => {
+  const capture = vi.fn();
   render(
     <SurfaceHarness
       data={dashboard({ sourceHealth: { sourceCount: 0, issues: [] } })}
+      onCapture={capture}
     />,
   );
   expect(
@@ -107,6 +116,8 @@ test("shows product empty states and first-run source CTA", () => {
   expect(
     screen.getByRole("button", { name: "Connect a Source" }),
   ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Capture something" }));
+  expect(capture).toHaveBeenCalledOnce();
 });
 
 test("edit mode adds and removes built-in widgets", async () => {
@@ -167,6 +178,7 @@ test("quick planning uses the available actions supplied by WorkView", async () 
       onRun={run}
       onOpen={open}
       onSources={() => undefined}
+      onCapture={() => undefined}
     />,
   );
   expect(open).not.toHaveBeenCalled();
@@ -203,6 +215,7 @@ test("quick actions run only the commands advertised by WorkView", async () => {
       onRun={run}
       onOpen={open}
       onSources={() => undefined}
+      onCapture={() => undefined}
     />,
   );
 
@@ -240,6 +253,7 @@ test("generic work rendering opens the source without provider-specific cards", 
       onRun={async () => undefined}
       onOpen={open}
       onSources={() => undefined}
+      onCapture={() => undefined}
     />,
   );
   fireEvent.click(screen.getByRole("button", { name: /Review merge request/ }));
@@ -272,6 +286,7 @@ test("source health remains non-blocking and links to Sources", () => {
       onRun={async () => undefined}
       onOpen={async () => undefined}
       onSources={sources}
+      onCapture={() => undefined}
     />,
   );
   expect(screen.getByText("Cached work")).toBeInTheDocument();

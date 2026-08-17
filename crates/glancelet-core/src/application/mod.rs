@@ -20,8 +20,8 @@ use serde_json::Value;
 
 use crate::{
     domain::{
-        ProviderId, SourceBatch, SourceChange, WorkBinding, WorkDraft, WorkEntry, WorkPlanning,
-        WorkProgress,
+        ProviderId, SourceBatch, SourceChange, SourceIdentity, WorkBinding, WorkDraft, WorkEntry,
+        WorkPlanning, WorkProgress,
     },
     extension::{Connection, SourceConfig},
     GlanceletError, Result,
@@ -190,6 +190,11 @@ pub trait WorkStore: Send + Sync {
     fn desktop_preferences(&self) -> Result<DesktopPreferences>;
     fn save_desktop_preferences(&self, preferences: &DesktopPreferences) -> Result<()>;
     fn stored_work_by_id(&self, id: &str) -> Result<StoredWork>;
+    fn work_id_for_source_identity(
+        &self,
+        source_config_id: &str,
+        identity: &SourceIdentity,
+    ) -> Result<Option<String>>;
     fn mutate_work(&self, id: &str, mutation: WorkMutation, now: DateTime<Utc>) -> Result<()>;
     fn transition_local_progress(
         &self,

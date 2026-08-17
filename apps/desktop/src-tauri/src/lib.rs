@@ -2,7 +2,7 @@ use std::{
     env, fs,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -40,6 +40,7 @@ use glancelet_core::{
         GoogleTokenProvider, DEFAULT_SYNC_INTERVAL_SECONDS as GOOGLE_SYNC_INTERVAL_SECONDS,
         PROVIDER_ID as GOOGLE_PROVIDER_ID, SOURCE_TYPE as GOOGLE_SOURCE_TYPE,
     },
+    sources::local::{self, SOURCE_CONFIG_ID as LOCAL_SOURCE_CONFIG_ID},
     sources::notion::{
         self, NotionApiClient, NotionDataSource, NotionDataSourceSummary, NotionPreviewRow,
         NotionSourceSettings, NotionTokenProvider, DEFAULT_SYNC_INTERVAL_SECONDS,
@@ -59,6 +60,7 @@ use tauri::{
     Emitter, Manager, State,
 };
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -71,6 +73,8 @@ const SLACK_REDIRECT_URI: &str = "http://localhost:42813/oauth/slack/callback";
 const SLACK_CALLBACK_ADDRESS: &str = "127.0.0.1:42813";
 const WORK_CHANGED_EVENT: &str = "glancelet://work-changed";
 const NAVIGATE_EVENT: &str = "glancelet://navigate";
+const DESKTOP_SETTINGS_CHANGED_EVENT: &str = "glancelet://desktop-settings-changed";
+const GLOBAL_SHORTCUT: &str = "CommandOrControl+Shift+Space";
 
 struct AppServices {
     store: Arc<SqliteWorkStore>,
@@ -82,6 +86,9 @@ struct AppServices {
     connections: ConnectionCommandService,
     navigation: NavigationService,
     clock: Arc<dyn Clock>,
+    time_context: TimeContext,
+    capture_lock: Mutex<()>,
+    shortcut_runtime: Mutex<ShortcutRuntime>,
     secrets: Arc<dyn SecretStore>,
     slack_tokens: Arc<SlackTokenProvider>,
     slack_oauth: SlackOAuthService,
@@ -101,6 +108,34 @@ struct AppServices {
     gitlab_device_flow: GitlabDeviceFlowService,
     gitlab_client_id: String,
     stopping: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct ShortcutRuntime {
+    registered: bool,
+    error: Option<String>,
+}
+
+impl ShortcutRuntime {
+    fn registered(&mut self) {
+        self.registered = true;
+        self.error = None;
+    }
+
+    fn registration_failed(&mut self) {
+        self.registered = false;
+        self.error =
+            Some("Global shortcut is unavailable. Another application may already use it.".into());
+    }
+
+    fn unregistered(&mut self) {
+        self.registered = false;
+        self.error = None;
+    }
+
+    fn unregistration_failed(&mut self) {
+        self.error = Some("Could not unregister the global shortcut.".into());
+    }
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -163,6 +198,9 @@ impl AppServices {
         // created by earlier development builds remain readable after restart.
         registry
             .register(fake::registration())
+            .map_err(|error| error.to_string())?;
+        registry
+            .register(local::registration())
             .map_err(|error| error.to_string())?;
         let store_port: Arc<dyn WorkStore> = store.clone();
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
@@ -272,6 +310,9 @@ impl AppServices {
             ),
             navigation: NavigationService::new(store_port),
             clock: Arc::clone(&clock),
+            time_context,
+            capture_lock: Mutex::new(()),
+            shortcut_runtime: Mutex::new(ShortcutRuntime::default()),
             secrets,
             slack_tokens,
             slack_oauth: SlackOAuthService::production(slack_client, Arc::new(SystemClock)),
@@ -549,6 +590,20 @@ struct GitlabDevicePollView {
 struct DesktopSettingsView {
     always_on_top: bool,
     launch_at_startup: bool,
+    global_shortcut_enabled: bool,
+    global_shortcut: &'static str,
+    global_shortcut_available: bool,
+    global_shortcut_error: Option<String>,
+    privacy_mode: bool,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CapturePlanning {
+    Inbox,
+    Today,
+    Tomorrow,
+    Backlog,
 }
 
 #[derive(Deserialize)]
@@ -573,7 +628,31 @@ enum WorkCommand {
 
 #[tauri::command]
 fn dashboard(services: State<'_, Arc<AppServices>>) -> Result<WorkWidgets, String> {
-    services.reads.widgets(7).map_err(|error| error.to_string())
+    let privacy_mode = services
+        .layouts
+        .preferences()
+        .map_err(|error| error.to_string())?
+        .privacy_mode;
+    let mut widgets = services
+        .reads
+        .widgets_with_privacy(7, privacy_mode)
+        .map_err(|error| error.to_string())?;
+    widgets
+        .source_health
+        .issues
+        .retain(|issue| issue.source_id != LOCAL_SOURCE_CONFIG_ID);
+    if services
+        .store
+        .source_configs()
+        .map_err(|error| error.to_string())?
+        .iter()
+        .any(|source| {
+            source.id == LOCAL_SOURCE_CONFIG_ID && source.enabled && source.removed_at.is_none()
+        })
+    {
+        widgets.source_health.source_count = widgets.source_health.source_count.saturating_sub(1);
+    }
+    Ok(widgets)
 }
 
 #[tauri::command]
@@ -605,9 +684,18 @@ fn desktop_settings(
         .autolaunch()
         .is_enabled()
         .map_err(|_| "Could not read the launch-at-startup setting".to_owned())?;
+    let shortcut = services
+        .shortcut_runtime
+        .lock()
+        .expect("shortcut runtime poisoned");
     Ok(DesktopSettingsView {
         always_on_top: preferences.always_on_top,
         launch_at_startup,
+        global_shortcut_enabled: preferences.global_shortcut_enabled,
+        global_shortcut: GLOBAL_SHORTCUT,
+        global_shortcut_available: shortcut.registered,
+        global_shortcut_error: shortcut.error.clone(),
+        privacy_mode: preferences.privacy_mode,
     })
 }
 
@@ -642,6 +730,117 @@ fn set_launch_at_startup(app: tauri::AppHandle, enabled: bool) -> Result<(), Str
         manager.disable()
     }
     .map_err(|_| "Could not update the launch-at-startup setting".to_owned())
+}
+
+fn apply_global_shortcut(
+    app: &tauri::AppHandle,
+    services: &AppServices,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut runtime = services
+        .shortcut_runtime
+        .lock()
+        .expect("shortcut runtime poisoned");
+    if enabled && !runtime.registered {
+        match app.global_shortcut().register(GLOBAL_SHORTCUT) {
+            Ok(()) => runtime.registered(),
+            Err(_) => runtime.registration_failed(),
+        }
+    } else if !enabled && runtime.registered {
+        if app.global_shortcut().unregister(GLOBAL_SHORTCUT).is_ok() {
+            runtime.unregistered();
+        } else {
+            runtime.unregistration_failed();
+            return Err("Could not unregister the global shortcut.".into());
+        }
+    } else if !enabled {
+        runtime.unregistered();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_global_shortcut_enabled(
+    app: tauri::AppHandle,
+    services: State<'_, Arc<AppServices>>,
+    enabled: bool,
+) -> Result<(), String> {
+    let previous = services
+        .layouts
+        .preferences()
+        .map_err(|error| error.to_string())?;
+    services
+        .layouts
+        .set_global_shortcut_enabled(enabled)
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = apply_global_shortcut(&app, services.as_ref(), enabled) {
+        services
+            .layouts
+            .set_global_shortcut_enabled(previous.global_shortcut_enabled)
+            .map_err(|rollback| rollback.to_string())?;
+        return Err(error);
+    }
+    app.emit(DESKTOP_SETTINGS_CHANGED_EVENT, ())
+        .map_err(|_| "Could not refresh desktop settings".to_owned())
+}
+
+#[tauri::command]
+fn set_privacy_mode(
+    app: tauri::AppHandle,
+    services: State<'_, Arc<AppServices>>,
+    enabled: bool,
+) -> Result<(), String> {
+    services
+        .layouts
+        .set_privacy_mode(enabled)
+        .map_err(|error| error.to_string())?;
+    let _ = app.emit(DESKTOP_SETTINGS_CHANGED_EVENT, ());
+    app.emit(WORK_CHANGED_EVENT, ())
+        .map_err(|_| "Could not refresh the Surface".to_owned())
+}
+
+#[tauri::command]
+fn quick_capture(
+    app: tauri::AppHandle,
+    services: State<'_, Arc<AppServices>>,
+    request_id: String,
+    title: String,
+    planning: CapturePlanning,
+) -> Result<String, String> {
+    let _capture = services
+        .capture_lock
+        .lock()
+        .map_err(|_| "Quick Capture is temporarily unavailable".to_owned())?;
+    let now = services.clock.now();
+    let identity = local::ingest(services.store.as_ref(), &request_id, &title, now)
+        .map_err(|error| error.to_string())?;
+    services
+        .changes
+        .process_pending(100)
+        .map_err(|error| error.to_string())?;
+    let work_id = services
+        .store
+        .work_id_for_source_identity(LOCAL_SOURCE_CONFIG_ID, &identity)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Quick Capture could not create Work".to_owned())?;
+    match planning {
+        CapturePlanning::Inbox => services.commands.move_to_inbox(&work_id),
+        CapturePlanning::Today => services
+            .commands
+            .plan(&work_id, services.time_context.local_date(now)),
+        CapturePlanning::Tomorrow => {
+            let today = services.time_context.local_date(now);
+            let tomorrow = today
+                .succ_opt()
+                .ok_or_else(|| "Tomorrow is outside the supported date range".to_owned())?;
+            services.commands.plan(&work_id, tomorrow)
+        }
+        CapturePlanning::Backlog => services.commands.move_to_backlog(&work_id),
+    }
+    .map_err(|error| error.to_string())?;
+    app.emit(WORK_CHANGED_EVENT, ())
+        .map_err(|_| "Could not refresh the Surface".to_owned())?;
+    Ok(work_id)
 }
 
 #[tauri::command]
@@ -1962,6 +2161,10 @@ fn show_main_window(app: &tauri::AppHandle, destination: Option<&str>) {
     }
 }
 
+fn shortcut_should_hide_window(visible: bool, minimized: bool) -> bool {
+    visible && !minimized
+}
+
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Glancelet", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, "hide", "Hide Glancelet", true, None::<&str>)?;
@@ -1972,10 +2175,20 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
+    let privacy = MenuItem::with_id(
+        app,
+        "privacy_mode",
+        "Toggle Privacy Mode",
+        true,
+        None::<&str>,
+    )?;
     let sources = MenuItem::with_id(app, "sources", "Sources", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &hide, &always, &sources, &settings, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[&show, &hide, &always, &privacy, &sources, &settings, &quit],
+    )?;
     let icon = app
         .default_window_icon()
         .cloned()
@@ -2002,11 +2215,24 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                     if let Some(window) = app.get_webview_window("main") {
                         if window.set_always_on_top(next).is_ok() {
                             if services.layouts.set_always_on_top(next).is_ok() {
-                                let _ = app.emit("glancelet://desktop-settings-changed", ());
+                                let _ = app.emit(DESKTOP_SETTINGS_CHANGED_EVENT, ());
                             } else {
                                 let _ = window.set_always_on_top(current);
                             }
                         }
+                    }
+                }
+            }
+            "privacy_mode" => {
+                let services = app.state::<Arc<AppServices>>();
+                if let Ok(preferences) = services.layouts.preferences() {
+                    if services
+                        .layouts
+                        .set_privacy_mode(!preferences.privacy_mode)
+                        .is_ok()
+                    {
+                        let _ = app.emit(DESKTOP_SETTINGS_CHANGED_EVENT, ());
+                        let _ = app.emit(WORK_CHANGED_EVENT, ());
                     }
                 }
             }
@@ -2136,6 +2362,25 @@ pub fn run() {
             }
         }))
         .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() != ShortcutState::Pressed {
+                        return;
+                    }
+                    if let Some(window) = app.get_webview_window("main") {
+                        if shortcut_should_hide_window(
+                            window.is_visible().unwrap_or(false),
+                            window.is_minimized().unwrap_or(false),
+                        ) {
+                            let _ = window.hide();
+                        } else {
+                            show_main_window(app, None);
+                        }
+                    }
+                })
+                .build(),
+        )
+        .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(
                     tauri_plugin_window_state::StateFlags::POSITION
@@ -2160,6 +2405,11 @@ pub fn run() {
                     .set_always_on_top(preferences.always_on_top)
                     .map_err(std::io::Error::other)?;
             }
+            let _ = apply_global_shortcut(
+                app.handle(),
+                services.as_ref(),
+                preferences.global_shortcut_enabled,
+            );
             let scheduler_services = Arc::clone(&services);
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -2195,6 +2445,9 @@ pub fn run() {
             desktop_settings,
             set_always_on_top,
             set_launch_at_startup,
+            set_global_shortcut_enabled,
+            set_privacy_mode,
+            quick_capture,
             sync_all,
             slack_connections,
             connect_slack,
@@ -2248,6 +2501,7 @@ pub fn run() {
                 app.state::<Arc<AppServices>>()
                     .stopping
                     .store(true, Ordering::Relaxed);
+                let _ = app.global_shortcut().unregister(GLOBAL_SHORTCUT);
             }
         });
 }
@@ -2636,7 +2890,7 @@ fn seed_fake_sources(store: &SqliteWorkStore) -> Result<(), String> {
 
 #[cfg(test)]
 mod desktop_window_tests {
-    use super::{recovered_geometry, WindowBounds};
+    use super::{recovered_geometry, shortcut_should_hide_window, ShortcutRuntime, WindowBounds};
 
     #[test]
     fn offscreen_geometry_recovers_to_a_visible_monitor() {
@@ -2730,5 +2984,28 @@ mod desktop_window_tests {
                 height: 720,
             })
         );
+    }
+
+    #[test]
+    fn shortcut_conflict_is_non_fatal_and_later_registration_recovers() {
+        let mut runtime = ShortcutRuntime::default();
+        runtime.registration_failed();
+        assert!(!runtime.registered);
+        assert!(runtime.error.is_some());
+
+        runtime.registered();
+        assert!(runtime.registered);
+        assert!(runtime.error.is_none());
+
+        runtime.unregistered();
+        assert!(!runtime.registered);
+        assert!(runtime.error.is_none());
+    }
+
+    #[test]
+    fn shortcut_hides_only_a_visible_non_minimized_window() {
+        assert!(shortcut_should_hide_window(true, false));
+        assert!(!shortcut_should_hide_window(false, false));
+        assert!(!shortcut_should_hide_window(true, true));
     }
 }
