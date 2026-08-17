@@ -1022,7 +1022,15 @@ test("persists opt-in desktop settings through Tauri commands", async () => {
       return Promise.resolve({ today: [], inbox: [] });
     if (command === "widget_layout") return Promise.resolve(undefined);
     if (command === "desktop_settings") {
-      return Promise.resolve({ alwaysOnTop: false, launchAtStartup: false });
+      return Promise.resolve({
+        alwaysOnTop: false,
+        launchAtStartup: false,
+        globalShortcutEnabled: true,
+        globalShortcut: "CommandOrControl+Shift+Space",
+        globalShortcutAvailable: true,
+        globalShortcutError: null,
+        privacyMode: false,
+      });
     }
     return Promise.resolve(undefined);
   });
@@ -1074,8 +1082,10 @@ test("persists Widget additions through the layout command", async () => {
   });
 
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Edit layout" }));
-  fireEvent.click(screen.getByRole("button", { name: /Upcoming.*Add/ }));
+  const edit = await screen.findByRole("button", { name: "Edit layout" });
+  await waitFor(() => expect(edit).toBeEnabled());
+  fireEvent.click(edit);
+  fireEvent.click(await screen.findByRole("button", { name: /Upcoming.*Add/ }));
 
   await waitFor(() =>
     expect(mocks.invoke).toHaveBeenCalledWith(
@@ -1087,6 +1097,132 @@ test("persists Widget additions through the layout command", async () => {
       }),
     ),
   );
+});
+
+test("opens Quick Capture with C and refreshes the Surface after submit", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard")
+      return Promise.resolve({
+        today: [],
+        inbox: [],
+        upcoming: [],
+        attention: [],
+      });
+    if (command === "widget_layout") return Promise.resolve(undefined);
+    if (command === "desktop_settings")
+      return Promise.resolve({
+        alwaysOnTop: false,
+        launchAtStartup: false,
+        globalShortcutEnabled: true,
+        globalShortcut: "CommandOrControl+Shift+Space",
+        globalShortcutAvailable: true,
+        globalShortcutError: null,
+        privacyMode: false,
+      });
+    if (command === "quick_capture") return Promise.resolve("local-work-id");
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  await screen.findByRole("button", { name: "Edit layout" });
+  fireEvent.keyDown(document.body, { key: "c" });
+  const title = await screen.findByRole("textbox", { name: "Capture title" });
+  fireEvent.change(title, { target: { value: "Review deployment issue" } });
+  fireEvent.submit(screen.getByRole("dialog", { name: "Quick Capture" }));
+
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "quick_capture",
+      expect.objectContaining({
+        title: "Review deployment issue",
+        planning: "inbox",
+        requestId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      }),
+    ),
+  );
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "Quick Capture" }),
+    ).not.toBeInTheDocument(),
+  );
+});
+
+test("privacy toggle refreshes redacted Work and remains usable with capture", async () => {
+  let privacyMode = false;
+  mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+    if (command === "dashboard")
+      return Promise.resolve({
+        today: [
+          {
+            ...dashboardWith(
+              privacyMode ? "Private work item" : "Secret merger",
+            ),
+          },
+        ].flatMap((value) => value.today),
+        inbox: [],
+        upcoming: [],
+        attention: [],
+      });
+    if (command === "widget_layout") return Promise.resolve(undefined);
+    if (command === "desktop_settings")
+      return Promise.resolve({
+        alwaysOnTop: false,
+        launchAtStartup: false,
+        globalShortcutEnabled: true,
+        globalShortcut: "CommandOrControl+Shift+Space",
+        globalShortcutAvailable: true,
+        globalShortcutError: null,
+        privacyMode,
+      });
+    if (command === "set_privacy_mode") {
+      privacyMode = (args as { enabled: boolean }).enabled;
+      return Promise.resolve(undefined);
+    }
+    return Promise.resolve([]);
+  });
+
+  render(<App />);
+  expect(await screen.findByText("Secret merger")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Privacy Off" }));
+  expect(await screen.findByText("Private work item")).toBeInTheDocument();
+  expect(screen.queryByText("Secret merger")).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Privacy On" }),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Capture" }));
+  expect(
+    screen.getByRole("dialog", { name: "Quick Capture" }),
+  ).toBeInTheDocument();
+});
+
+test("shows a non-blocking global shortcut registration warning", async () => {
+  mocks.invoke.mockImplementation((command: string) => {
+    if (command === "dashboard")
+      return Promise.resolve({ today: [], inbox: [] });
+    if (command.endsWith("_connections")) return Promise.resolve([]);
+    if (command === "desktop_settings")
+      return Promise.resolve({
+        alwaysOnTop: false,
+        launchAtStartup: false,
+        globalShortcutEnabled: true,
+        globalShortcut: "CommandOrControl+Shift+Space",
+        globalShortcutAvailable: false,
+        globalShortcutError:
+          "Global shortcut is unavailable. Another application may already use it.",
+        privacyMode: false,
+      });
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  expect(
+    await screen.findByText(/Another application may already use it/),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("checkbox", { name: /Global shortcut/ }),
+  ).toBeChecked();
 });
 
 function deferred<T>() {

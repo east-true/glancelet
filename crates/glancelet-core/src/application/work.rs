@@ -150,6 +150,14 @@ impl WorkReadService {
     }
 
     pub fn widgets(&self, upcoming_days: u64) -> Result<WorkWidgets> {
+        self.widgets_with_privacy(upcoming_days, false)
+    }
+
+    pub fn widgets_with_privacy(
+        &self,
+        upcoming_days: u64,
+        privacy_mode: bool,
+    ) -> Result<WorkWidgets> {
         let now = self.clock.now();
         let today = self.time_context.local_date(now);
         let mut today_items = Vec::new();
@@ -166,7 +174,7 @@ impl WorkReadService {
                 && stored.entry.planning == Some(WorkPlanning::Inbox);
             let upcoming = upcoming_entries(&stored, today, upcoming_days, self.time_context);
             let is_attention = stored.entry.kind == WorkKind::Attention;
-            let view = self.to_view(stored, now)?;
+            let view = self.to_view(stored, now, privacy_mode)?;
             if is_today {
                 today_items.push(view.clone());
             }
@@ -211,6 +219,12 @@ impl WorkReadService {
                 });
             }
         }
+        if privacy_mode {
+            for (index, issue) in issues.iter_mut().enumerate() {
+                issue.source_id = format!("private-source-{index}");
+                issue.source_name = "Private source".into();
+            }
+        }
 
         Ok(WorkWidgets {
             today: today_items,
@@ -224,7 +238,12 @@ impl WorkReadService {
         })
     }
 
-    fn to_view(&self, stored: StoredWork, now: DateTime<Utc>) -> Result<WorkView> {
+    fn to_view(
+        &self,
+        stored: StoredWork,
+        now: DateTime<Utc>,
+        privacy_mode: bool,
+    ) -> Result<WorkView> {
         let metadata = self
             .registry
             .display_metadata(&stored.source_config.source_type_id)?;
@@ -270,7 +289,7 @@ impl WorkReadService {
             actions.push(WorkAction::OpenSource);
         }
 
-        Ok(WorkView {
+        let mut view = WorkView {
             id: stored.entry.id,
             kind: stored.entry.kind,
             title: stored.entry.title,
@@ -302,8 +321,29 @@ impl WorkReadService {
             dimensions: stored.entry.dimensions,
             facets: stored.entry.facets,
             available_actions: actions,
-        })
+        };
+        if privacy_mode {
+            redact_work_view(&mut view);
+        }
+        Ok(view)
     }
+}
+
+fn redact_work_view(view: &mut WorkView) {
+    view.title = if view.kind == WorkKind::Event {
+        "Private event".into()
+    } else {
+        "Private work item".into()
+    };
+    view.summary = None;
+    view.source = SourceView {
+        provider_id: "private".into(),
+        provider_name: "Private".into(),
+        source_name: "Private".into(),
+        config_name: "Private".into(),
+    };
+    view.dimensions = serde_json::json!({});
+    view.facets = serde_json::json!({});
 }
 
 fn upcoming_entries(

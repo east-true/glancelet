@@ -299,7 +299,20 @@ fn widget_layout_rejects_duplicate_builtin_widgets_and_persists_preferences() {
         settings: json!({}),
     };
     assert!(layouts.save(&[duplicate.clone(), duplicate]).is_err());
-    assert!(!layouts.preferences().unwrap().always_on_top);
+    let defaults = layouts.preferences().unwrap();
+    assert!(!defaults.always_on_top);
+    assert!(defaults.global_shortcut_enabled);
+    assert!(!defaults.privacy_mode);
     assert!(layouts.set_always_on_top(true).unwrap().always_on_top);
-    assert!(layouts.preferences().unwrap().always_on_top);
+    assert!(layouts.set_privacy_mode(true).unwrap().privacy_mode);
+    assert!(
+        layouts
+            .set_global_shortcut_enabled(false)
+            .unwrap()
+            .privacy_mode
+    );
+    let saved = layouts.preferences().unwrap();
+    assert!(saved.always_on_top);
+    assert!(!saved.global_shortcut_enabled);
+    assert!(saved.privacy_mode);
 }

@@ -16,6 +16,7 @@ import {
   type NotionSource,
   type NotionSourceSettings,
   type SlackConnection,
+  type CapturePlanning,
   type DesktopSettings,
   type WidgetInstance,
   type WorkCommand,
@@ -27,6 +28,7 @@ import { GoogleSettings } from "./GoogleSettings";
 import { GithubSettings } from "./GithubSettings";
 import { GitlabSettings } from "./GitlabSettings";
 import { Modal } from "./Modal";
+import { QuickCapture } from "./QuickCapture";
 import { SettingsOverlay, type SettingsSection } from "./SettingsOverlay";
 import { useDismissingError } from "./useDismissingError";
 import "./styles.css";
@@ -45,6 +47,8 @@ const defaultLayout: WidgetInstance[] = [
 ];
 const DASHBOARD_TIME_REFRESH_MS = 60_000;
 type Tab = "surface" | "sources" | "settings";
+type DesktopSettingKey =
+  "alwaysOnTop" | "launchAtStartup" | "globalShortcutEnabled" | "privacyMode";
 
 function normalizedDashboard(value: WorkDashboard | undefined): WorkDashboard {
   const today = value?.today ?? [];
@@ -81,11 +85,17 @@ export default function App() {
   const [desktopSettings, setDesktopSettings] = useState<DesktopSettings>({
     alwaysOnTop: false,
     launchAtStartup: false,
+    globalShortcutEnabled: true,
+    globalShortcut: "CommandOrControl+Shift+Space",
+    globalShortcutAvailable: false,
+    globalShortcutError: null,
+    privacyMode: false,
   });
   const [pendingDesktopSettings, setPendingDesktopSettings] = useState<
-    Set<keyof DesktopSettings>
+    Set<DesktopSettingKey>
   >(() => new Set());
-  const pendingDesktopSettingsRef = useRef(new Set<keyof DesktopSettings>());
+  const pendingDesktopSettingsRef = useRef(new Set<DesktopSettingKey>());
+  const [captureOpen, setCaptureOpen] = useState(false);
   const [slackConnections, setSlackConnections] = useState<SlackConnection[]>(
     [],
   );
@@ -205,6 +215,14 @@ export default function App() {
     );
     const initialRefresh = window.setTimeout(() => {
       void refresh();
+      void glanceletApi
+        .desktopSettings()
+        .then((settings) => {
+          if (!disposed && settings) setDesktopSettings(settings);
+        })
+        .catch((reason) => {
+          if (!disposed) setError(String(reason));
+        });
       void Promise.resolve(glanceletApi.widgetLayout())
         .then((widgets) => {
           if (disposed) return;
@@ -249,11 +267,12 @@ export default function App() {
       else unlistenNavigation = dispose;
     });
     void listen("glancelet://desktop-settings-changed", () => {
-      if (tabRef.current === "settings") {
-        void glanceletApi.desktopSettings().then((settings) => {
+      void glanceletApi
+        .desktopSettings()
+        .then((settings) => {
           if (settings) setDesktopSettings(settings);
-        });
-      }
+        })
+        .catch((reason) => setError(String(reason)));
     }).then((dispose) => {
       if (disposed) dispose();
       else unlistenSettings = dispose;
@@ -264,6 +283,38 @@ export default function App() {
       unlistenSettings?.();
     };
   }, [refreshSources]);
+
+  useEffect(() => {
+    function openCaptureFromKeyboard(event: KeyboardEvent) {
+      if (
+        event.defaultPrevented ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.altKey ||
+        event.shiftKey ||
+        event.key.toLowerCase() !== "c" ||
+        captureOpen ||
+        editingLayout ||
+        tabRef.current !== "surface"
+      ) {
+        return;
+      }
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        target.closest(
+          "input, textarea, select, button, [contenteditable='true']",
+        )
+      ) {
+        return;
+      }
+      event.preventDefault();
+      setCaptureOpen(true);
+    }
+    document.addEventListener("keydown", openCaptureFromKeyboard);
+    return () =>
+      document.removeEventListener("keydown", openCaptureFromKeyboard);
+  }, [captureOpen, editingLayout]);
 
   async function sync() {
     if (syncing) return;
@@ -289,16 +340,6 @@ export default function App() {
     tabRef.current = next;
     setTab(next);
     if (next === "sources") await refreshSources();
-    if (next === "settings") await refreshDesktopSettings();
-  }
-
-  async function refreshDesktopSettings() {
-    try {
-      const settings = await glanceletApi.desktopSettings();
-      if (settings) setDesktopSettings(settings);
-    } catch (reason) {
-      setError(String(reason));
-    }
   }
 
   function saveLayout(next: WidgetInstance[]) {
@@ -322,7 +363,7 @@ export default function App() {
   }
 
   async function updateDesktopSetting(
-    key: keyof DesktopSettings,
+    key: DesktopSettingKey,
     enabled: boolean,
   ) {
     if (pendingDesktopSettingsRef.current.has(key)) return;
@@ -333,7 +374,12 @@ export default function App() {
     try {
       setError(null);
       if (key === "alwaysOnTop") await glanceletApi.setAlwaysOnTop(enabled);
-      else await glanceletApi.setLaunchAtStartup(enabled);
+      else if (key === "launchAtStartup")
+        await glanceletApi.setLaunchAtStartup(enabled);
+      else if (key === "globalShortcutEnabled")
+        await glanceletApi.setGlobalShortcutEnabled(enabled);
+      else await glanceletApi.setPrivacyMode(enabled);
+      if (key === "privacyMode") await refresh(false);
     } catch (reason) {
       setDesktopSettings((current) => ({ ...current, [key]: previous }));
       setError(String(reason));
@@ -382,12 +428,48 @@ export default function App() {
     }
   }
 
+  async function capture(
+    requestId: string,
+    title: string,
+    planning: CapturePlanning,
+  ) {
+    setError(null);
+    await glanceletApi.quickCapture(requestId, title, planning);
+    await refresh(false);
+  }
+
   const globalBusy = initialLoading || syncing;
   const syncLabel = initialLoading ? "Loading…" : syncing ? "Syncing…" : "Sync";
 
   return (
     <main className="app-shell">
       <div className="toolbar-row">
+        <button
+          type="button"
+          className="capture-button"
+          onClick={() => setCaptureOpen(true)}
+          title="Quick Capture (C)"
+        >
+          <span aria-hidden="true">＋</span> Capture
+        </button>
+        <button
+          type="button"
+          className={`privacy-button${desktopSettings.privacyMode ? " active" : ""}`}
+          aria-pressed={desktopSettings.privacyMode}
+          disabled={pendingDesktopSettings.has("privacyMode")}
+          onClick={() =>
+            void updateDesktopSetting(
+              "privacyMode",
+              !desktopSettings.privacyMode,
+            )
+          }
+        >
+          <span aria-hidden="true">
+            {desktopSettings.privacyMode ? "●" : "○"}
+          </span>
+          Privacy {desktopSettings.privacyMode ? "On" : "Off"}
+        </button>
+        <span className="toolbar-spacer" />
         <button
           type="button"
           className="icon-button btn-primary"
@@ -470,7 +552,16 @@ export default function App() {
         onRun={run}
         onOpen={open}
         onSources={() => void selectTab("sources")}
+        onCapture={() => setCaptureOpen(true)}
       />
+
+      {captureOpen && (
+        <QuickCapture
+          open
+          onClose={() => setCaptureOpen(false)}
+          onCapture={capture}
+        />
+      )}
 
       {tab !== "surface" && (
         <SettingsOverlay
@@ -538,8 +629,8 @@ function GeneralSettings({
   update,
 }: {
   settings: DesktopSettings;
-  pending: Set<keyof DesktopSettings>;
-  update: (key: keyof DesktopSettings, enabled: boolean) => Promise<void>;
+  pending: Set<DesktopSettingKey>;
+  update: (key: DesktopSettingKey, enabled: boolean) => Promise<void>;
 }) {
   return (
     <section className="general-settings" aria-label="General settings">
@@ -547,6 +638,37 @@ function GeneralSettings({
         <h2>Desktop</h2>
         <p>Control how Glancelet stays available throughout your day.</p>
       </div>
+      <label>
+        <span>
+          <strong>Global shortcut</strong>
+          <small>
+            Show or hide Glancelet with {settings.globalShortcut}.
+            {settings.globalShortcutError
+              ? ` ${settings.globalShortcutError}`
+              : ""}
+          </small>
+        </span>
+        <input
+          type="checkbox"
+          checked={settings.globalShortcutEnabled}
+          disabled={pending.has("globalShortcutEnabled")}
+          onChange={(event) =>
+            void update("globalShortcutEnabled", event.target.checked)
+          }
+        />
+      </label>
+      <label>
+        <span>
+          <strong>Privacy Mode</strong>
+          <small>Hide Work content before it reaches the Surface.</small>
+        </span>
+        <input
+          type="checkbox"
+          checked={settings.privacyMode}
+          disabled={pending.has("privacyMode")}
+          onChange={(event) => void update("privacyMode", event.target.checked)}
+        />
+      </label>
       <label>
         <span>
           <strong>Always on Top</strong>

@@ -445,6 +445,44 @@ impl SqliteWorkStore {
                 )
                 .map_err(storage_error)?;
         }
+        let daily_use_preferences_applied = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=8)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(storage_error)?;
+        if !daily_use_preferences_applied {
+            if !table_has_column(
+                &transaction,
+                "desktop_preferences",
+                "global_shortcut_enabled",
+            )? {
+                transaction
+                    .execute(
+                        "ALTER TABLE desktop_preferences
+                           ADD COLUMN global_shortcut_enabled INTEGER NOT NULL DEFAULT 1",
+                        [],
+                    )
+                    .map_err(storage_error)?;
+            }
+            if !table_has_column(&transaction, "desktop_preferences", "privacy_mode")? {
+                transaction
+                    .execute(
+                        "ALTER TABLE desktop_preferences
+                           ADD COLUMN privacy_mode INTEGER NOT NULL DEFAULT 0",
+                        [],
+                    )
+                    .map_err(storage_error)?;
+            }
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version, name)
+                     VALUES (8, '008_daily_use_preferences')",
+                    [],
+                )
+                .map_err(storage_error)?;
+        }
         transaction.commit().map_err(storage_error)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -462,6 +500,25 @@ impl SqliteWorkStore {
             )
             .map_err(storage_error)
     }
+}
+
+fn table_has_column(
+    transaction: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+) -> Result<bool> {
+    let mut statement = transaction
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(storage_error)?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(storage_error)?;
+    for existing in columns {
+        if existing.map_err(storage_error)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 impl WorkStore for SqliteWorkStore {
@@ -1184,11 +1241,14 @@ impl WorkStore for SqliteWorkStore {
             .lock()
             .expect("sqlite connection poisoned")
             .query_row(
-                "SELECT always_on_top FROM desktop_preferences WHERE id=1",
+                "SELECT always_on_top, global_shortcut_enabled, privacy_mode
+                 FROM desktop_preferences WHERE id=1",
                 [],
                 |row| {
                     Ok(DesktopPreferences {
                         always_on_top: row.get(0)?,
+                        global_shortcut_enabled: row.get(1)?,
+                        privacy_mode: row.get(2)?,
                     })
                 },
             )
@@ -1200,8 +1260,14 @@ impl WorkStore for SqliteWorkStore {
             .lock()
             .expect("sqlite connection poisoned")
             .execute(
-                "UPDATE desktop_preferences SET always_on_top=?1 WHERE id=1",
-                [preferences.always_on_top],
+                "UPDATE desktop_preferences
+                 SET always_on_top=?1, global_shortcut_enabled=?2, privacy_mode=?3
+                 WHERE id=1",
+                params![
+                    preferences.always_on_top,
+                    preferences.global_shortcut_enabled,
+                    preferences.privacy_mode
+                ],
             )
             .map(|_| ())
             .map_err(storage_error)
@@ -1219,6 +1285,27 @@ impl WorkStore for SqliteWorkStore {
             .optional()
             .map_err(storage_error)?
             .ok_or_else(|| GlanceletError::NotFound(format!("work entry {id}")))
+    }
+
+    fn work_id_for_source_identity(
+        &self,
+        source_config_id: &str,
+        identity: &SourceIdentity,
+    ) -> Result<Option<String>> {
+        self.connection
+            .lock()
+            .expect("sqlite connection poisoned")
+            .query_row(
+                "SELECT wb.work_entry_id
+                 FROM source_entities se
+                 JOIN work_bindings wb ON wb.source_entity_id=se.id
+                 WHERE se.source_config_id=?1 AND se.entity_type=?2 AND se.external_id=?3
+                 ORDER BY wb.source_activation_seq DESC LIMIT 1",
+                params![source_config_id, identity.entity_type, identity.external_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)
     }
 
     fn mutate_work(&self, id: &str, mutation: WorkMutation, now: DateTime<Utc>) -> Result<()> {

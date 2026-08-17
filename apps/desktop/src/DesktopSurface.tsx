@@ -39,6 +39,7 @@ export function DesktopSurface({
   onRun,
   onOpen,
   onSources,
+  onCapture,
 }: {
   data: WorkDashboard;
   layout: WidgetInstance[];
@@ -50,6 +51,7 @@ export function DesktopSurface({
   onRun: (id: string, command: WorkCommand) => Promise<void>;
   onOpen: (id: string) => Promise<void>;
   onSources: () => void;
+  onCapture: () => void;
 }) {
   const [dragged, setDragged] = useState<WidgetType | null>(null);
   const ordered = useMemo(
@@ -178,13 +180,14 @@ export function DesktopSurface({
 
       {!loading && data.sourceHealth.sourceCount === 0 && workCount === 0 && (
         <div className="first-run-card">
-          <span>Your work will appear here.</span>
-          <p>
-            Connect a source to start collecting work that needs your attention.
-          </p>
-          <button className="btn-primary" onClick={onSources}>
-            Connect a Source
-          </button>
+          <span>Nothing here yet.</span>
+          <p>Capture something locally or connect the tools you already use.</p>
+          <div className="first-run-actions">
+            <button className="btn-primary" onClick={onCapture}>
+              Capture something
+            </button>
+            <button onClick={onSources}>Connect a Source</button>
+          </div>
         </div>
       )}
 

@@ -110,7 +110,14 @@ export interface WidgetInstance {
 export interface DesktopSettings {
   alwaysOnTop: boolean;
   launchAtStartup: boolean;
+  globalShortcutEnabled: boolean;
+  globalShortcut: string;
+  globalShortcutAvailable: boolean;
+  globalShortcutError: string | null;
+  privacyMode: boolean;
 }
+
+export type CapturePlanning = "inbox" | "today" | "tomorrow" | "backlog";
 
 export interface SlackConnection {
   connectionId: string;
@@ -409,6 +416,18 @@ export const glanceletApi = {
     mutateDesktopSettings(() =>
       invoke<void>("set_launch_at_startup", { enabled }),
     ),
+  setGlobalShortcutEnabled: (enabled: boolean) =>
+    mutateDesktopSettings(() =>
+      invoke<void>("set_global_shortcut_enabled", { enabled }),
+    ),
+  setPrivacyMode: (enabled: boolean) =>
+    mutateDesktopSettings(() => invoke<void>("set_privacy_mode", { enabled })),
+  quickCapture: (requestId: string, title: string, planning: CapturePlanning) =>
+    invoke<string>("quick_capture", {
+      requestId,
+      title,
+      planning,
+    }),
   sync: () => invoke<SyncReport>("sync_all"),
   slackConnections: readSlackConnections,
   connectSlack: () => invoke<void>("connect_slack"),
