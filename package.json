@@ -15,7 +15,7 @@
     "tauri": "npm run tauri --workspace @glancelet/desktop"
   },
   "devDependencies": {
-    "jsdom": "30.0.1",
+    "jsdom": "30.1.2",
     "prettier": "^3.9.8"
   }
 }
